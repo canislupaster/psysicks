@@ -97,6 +97,22 @@
         "cwchar": "c",
         "cwctype": "c",
         "numeric": "c",
-        "tuple": "c"
+        "tuple": "c",
+        "sdl.h": "c",
+        "sstream": "c",
+        "gl.h": "c",
+        "glext.h": "c",
+        "ft2build.h": "c",
+        "ftheader.h": "c",
+        "cglm.h": "c",
+        "istream": "c",
+        "ostream": "c",
+        "streambuf": "c",
+        "cgltf.h": "c",
+        "lodepng.cpp": "c",
+        "graphics.h": "c",
+        "fpsutil.h": "c",
+        "lodepng.h": "c",
+        "stb_image.h": "c"
     }
 }

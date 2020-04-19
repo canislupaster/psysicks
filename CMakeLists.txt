@@ -7,18 +7,20 @@ if (CMAKE_BUILD_TYPE MATCHES Debug)
 endif ()
 
 add_subdirectory(corecommon)
-include_directories(./corecommon/src)
+include_directories(./corecommon/src ./cgltf ./lodepng)
 
 file(GLOB SRC ./src/*.c)
 
 add_executable(fps ${SRC})
-add_dependencies(fps corecommon)
+
+find_package(OpenGL REQUIRED)
+find_package(SDL REQUIRED)
+find_package(Freetype REQUIRED)
 
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(CGLM REQUIRED cglm)
 
-pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo)
-pkg_check_modules(LIBPNG16 REQUIRED IMPORTED_TARGET libpng16)
+add_dependencies(fps corecommon)
 
-pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua-5.1)
-
-target_link_libraries(fps PUBLIC corecommon PkgConfig::CAIRO PkgConfig::LIBPNG16 PkgConfig::LUA)
+target_include_directories(fps PUBLIC ${SDL_INCLUDE_DIR} ${FREETYPE_INCLUDE_DIRS} ${CGLM_INCLUDE_DIRS})
+target_link_libraries(fps PUBLIC corecommon ${OPENGL_LIBRARY} ${SDL_LIBRARY} ${FREETYPE_LIBRARY} ${CGLM_LIBRARY_DIRS})
