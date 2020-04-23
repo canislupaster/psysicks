@@ -70,7 +70,13 @@ int main(int argc, char** argv) {
   vec2 bounds = {(float)w,(float)h};
   render_t render = render_new(bounds);
   
-  object r2 = rect(0.2, 0.2, (vec4)BLUE);
+  tex_t tex = load_hdri(&render, "./Frozen_Waterfall_Ref.hdr");
+  // object r2 = rect(1200, 1200, (vec4)BLUE);
+  // object_setpos(&r2, (vec3){-600, -600, 0});
+
+  // r2.texture = tex;
+  // r2.space = spacescreen;
+  // r2.shader = shader_tex;
   
   // object_setpos(&r2, (vec3){0, 0, -0.5});
 
@@ -79,30 +85,42 @@ int main(int argc, char** argv) {
   // sdlerr();
   // glerr();
 
-  // gltf_scene sc = load_gltf(&render, "untitled.glb");
+  gltf_scene sc = load_gltf(&render, "untitled.glb");
+  // gltf_scene cube_sc = load_gltf(&render, "cube.glb");
   
-  // object* scobj = vector_get(&sc.objects, 0);
+  object* scobj = vector_get(&sc.objects, 0);
+  // object cube = object_new();
+  // add_cube(&cube, (vec3){-1, -1, -1}, (vec3){2, 2, 2});
+
+  // cube.shader = shader_cubemap;
+  // cube.texture = tex;
+  // 
+  // object_init(&cube);
   
   // r2.shader = shader_tex;
   // r2.texture = scobj->pbr.tex.diffuse;
 
-  cam_setpos(&render, (vec3){0,0,-2});
+  cam_setpos(&render, (vec3){0,0,-2.5});
 
-  vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, 1, 0}, .color=WHITE});
+  //vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, 1, 0}, .color=WHITE});
+
+	render.ibl.global_env_enabled = 1;
+	render.global_env = tex;
 
   // vector_add(&sc.dirlights, &render.dirlights);
   // vector_add(&sc.pointlights, &render.pointlights);
 
-  render_setambient(&render, (vec4){0.2,0.2,0.2,0.2});
+  //render_setambient(&render, (vec4){0.2,0.2,0.2,0.2});
 
   unsigned long frame = 0;
   while (1) {
     frame++;
     render_reset(&render);
-
     
+    render_object(&render, scobj);
 
-    // glm_rotate(scobj->transform, -M_PI/100, (vec3){1.0, 1.0, 1.0});
+  	glm_rotate(scobj->transform, M_PI/300, (vec3){0.1, 0.0, 0.0});
+    glm_rotate(scobj->transform, -M_PI/400, (vec3){0.0, 1.0, 0.0});
 
     // render_object(&render, &r2);
     // vector_iterator obj_iter = vector_iterate(&sc.objects);
@@ -137,7 +155,7 @@ int main(int argc, char** argv) {
         }
         case SDL_KEYDOWN: {
           if (ev.key.keysym.sym == SDLK_r) {
-            
+            load_shaders(&render);
           }
         }
       }

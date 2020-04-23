@@ -13,7 +13,8 @@
             "label": "make: fps",
             "type": "shell",
             "command": "make -C build fps",
-            "dependsOn": "headergen on fps"
+            "dependsOn": "headergen on fps",
+            "problemMatcher": "$gcc"
         },
         {
             "label": "make: headergen",

@@ -12,14 +12,15 @@
 #include <cglm/cglm.h>
 #include "cgltf.h"
 #include "util.h"
-#define WHITE {1.0, 1.0, 1.0, 1.0}
 typedef enum {spacescreen, space3d, spaceuninit} space_t;
 typedef enum {
   shader_fill,
   shader_tex,
+  shader_cubemap,
   shader_txt,
   shader_pbr
 } shaderkind;
+typedef GLuint tex_t;
 typedef struct {
   vector_t vertices;
   vector_t elements;
@@ -30,7 +31,7 @@ typedef struct {
   union {
     struct {
       vec4 col;
-      GLuint texture;
+      tex_t texture;
     };
 
     //heinous hell
@@ -43,7 +44,7 @@ typedef struct {
       vec3 emissive;
 
       struct {
-        GLuint diffuse, normal, emissive, orm;
+	GLuint diffuse, normal, emissive, orm;
       } tex;
     } pbr;
   };
@@ -60,9 +61,14 @@ typedef struct {
   GLuint transform;
 } obj_shader;
 typedef struct {
-  vec4 color;
-  vec3 dir;
-} dirlight;
+  unsigned global_env_enabled;
+  unsigned local_env_enabled;
+
+	unsigned pad[2]; //pad to 16 bytes;
+
+  vec4 local_envpos;
+  float local_envdist;
+} ibl_lighting;
 typedef struct {
   struct {
     obj_shader shader;
@@ -73,6 +79,11 @@ typedef struct {
     obj_shader shader;
     GLint tex;
   } tex;
+
+  struct {
+    obj_shader shader;
+    GLint tex;
+  } cubemap;
 
   struct {
     obj_shader shader;
@@ -88,11 +99,14 @@ typedef struct {
     GLint occlusion;
     GLint emissive;
 
+    GLint local_env;
+    GLint global_env;
+
     struct {
       GLint diffuse, normal, emissive, orm;
     } tex;
   } pbr;
-  
+
   FT_Library freetype;
 
   vec2 bounds;
@@ -102,6 +116,7 @@ typedef struct {
   //unit 1x1 textures
   GLuint default_tex;
   GLuint default_texrgb;
+  GLuint default_texcube;
 
   mat4 spacescreen;
   mat4 space3d;
@@ -112,16 +127,27 @@ typedef struct {
   vector_t pointlights;
   vector_t dirlights;
   vec4 ambient;
+
+  ibl_lighting ibl;
+	tex_t global_env;
+	tex_t local_env;
+
   GLuint lighting_buffer;
+
+  GLuint tex_fbo;
+  object full_rect;
+  object full_cube;
 } render_t;
 void update_bounds(render_t* render);
+void load_shaders(render_t* render);
+;
+
 render_t render_new(vec2 bounds);
 void render_free(render_t* render);
+tex_t load_hdri(render_t* render, char* hdri);
 void render_object(render_t* render, object* obj);
 void render_reset(render_t* render);
-void render_setambient(render_t* render, vec4 ambient);
 void cam_setpos(render_t* render, vec3 pos);
-void object_free(object* obj);
 typedef struct {
   vector_t objects;
   vector_t pointlights;

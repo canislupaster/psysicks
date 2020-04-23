@@ -15,11 +15,17 @@
             "preLaunchTask": "make: fps"
         },
         {
+            "name": "launch: fps (nodbg)",
+            
+            "preLaunchTask": "make: fps"
+        },
+        {
             "name": "launch: headergen",
-            "type": "lldb",
+            "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/corecommon/headergen",
             "args": ["./src"],
+            "MIMode": "gdb",
 
             "cwd": "${workspaceFolder}",
 

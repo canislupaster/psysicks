@@ -29,6 +29,7 @@ typedef enum {spacescreen, space3d, spaceuninit} space_t;
 typedef enum {
   shader_fill,
   shader_tex,
+  shader_cubemap,
   shader_txt,
   shader_pbr
 } shaderkind;
@@ -40,6 +41,8 @@ typedef struct {
   vec3 tangent;
 } vertex;
 
+typedef GLuint tex_t;
+
 typedef struct {
   vector_t vertices;
   vector_t elements;
@@ -50,7 +53,7 @@ typedef struct {
   union {
     struct {
       vec4 col;
-      GLuint texture;
+      tex_t texture;
     };
 
     //heinous hell
@@ -63,7 +66,7 @@ typedef struct {
       vec3 emissive;
 
       struct {
-        GLuint diffuse, normal, emissive, orm;
+	GLuint diffuse, normal, emissive, orm;
       } tex;
     } pbr;
   };
@@ -82,6 +85,11 @@ typedef struct {
 } obj_shader;
 
 typedef struct {
+  GLuint prog;
+  GLuint tex;
+} tex_shader; 
+
+typedef struct {
   vec4 color;
   vec3 pos;
   float dist;
@@ -95,12 +103,23 @@ typedef struct {
 #define MAX_LIGHTS 10
 
 typedef struct {
+  unsigned global_env_enabled;
+  unsigned local_env_enabled;
+
+	unsigned pad[2]; //pad to 16 bytes;
+
+  vec4 local_envpos;
+  float local_envdist;
+} ibl_lighting;
+
+typedef struct {
   int pointlights_enabled;
   pointlight pointlights[MAX_LIGHTS];
-  
+
   int dirlights_enabled;
   dirlight dirlights[MAX_LIGHTS];
 
+  ibl_lighting ibl;
   vec4 ambient;
 } lighting;
 
@@ -117,6 +136,11 @@ typedef struct {
 
   struct {
     obj_shader shader;
+    GLint tex;
+  } cubemap;
+
+  struct {
+    obj_shader shader;
     GLint color;
     GLint tex;
   } txt;
@@ -129,11 +153,14 @@ typedef struct {
     GLint occlusion;
     GLint emissive;
 
+    GLint local_env;
+    GLint global_env;
+
     struct {
       GLint diffuse, normal, emissive, orm;
     } tex;
   } pbr;
-  
+
   FT_Library freetype;
 
   vec2 bounds;
@@ -143,6 +170,7 @@ typedef struct {
   //unit 1x1 textures
   GLuint default_tex;
   GLuint default_texrgb;
+  GLuint default_texcube;
 
   mat4 spacescreen;
   mat4 space3d;
@@ -153,22 +181,31 @@ typedef struct {
   vector_t pointlights;
   vector_t dirlights;
   vec4 ambient;
+
+  ibl_lighting ibl;
+	tex_t global_env;
+	tex_t local_env;
+
   GLuint lighting_buffer;
+
+  GLuint tex_fbo;
+  object full_rect;
+  object full_cube;
 } render_t;
 
-obj_shader shader_new(const char* frag_src, const char* vert_src) {
+GLuint prog_new(const char* frag_src, const char* vert_src) {
   GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
   GLuint vert = glCreateShader(GL_VERTEX_SHADER);
 
   glShaderSource(frag, 1, &frag_src, NULL);
   glCompileShader(frag);
-  
+
   glShaderSource(vert, 1, &vert_src, NULL);
   glCompileShader(vert);
 
   int succ;
   char err[1024];
-  
+
   glGetShaderiv(frag, GL_COMPILE_STATUS, &succ);
   if (!succ) {
     glGetShaderInfoLog(frag, 1024, NULL, err);
@@ -186,12 +223,22 @@ obj_shader shader_new(const char* frag_src, const char* vert_src) {
   glAttachShader(prog, frag);
   glLinkProgram(prog);
 
-  obj_shader shad = {.prog=prog};
-  shad.obj = glGetUniformBlockIndex(prog, "object");
-  glUniformBlockBinding(prog, shad.obj, 0);
+  return prog;
+}
 
-  shad.transform = glGetUniformLocation(prog, "transform");
+obj_shader shader_new(const char* frag_src, const char* vert_src) {
+  obj_shader shad = {.prog=prog_new(frag_src, vert_src)};
+  shad.obj = glGetUniformBlockIndex(shad.prog, "object");
+  glUniformBlockBinding(shad.prog, shad.obj, 0);
 
+  shad.transform = glGetUniformLocation(shad.prog, "transform");
+
+  return shad;
+}
+
+tex_shader tex_shader_new(const char* frag_src, const char* vert_src) {
+  tex_shader shad = {.prog=prog_new(frag_src, vert_src)};
+  shad.tex = glGetUniformLocation(shad.prog, "tex");
   return shad;
 }
 
@@ -208,16 +255,34 @@ void update_bounds(render_t* render) {
 void unit_texture(GLuint* tex, GLenum format) {
   glGenTextures(1, tex);
   glBindTexture(GL_TEXTURE_2D, *tex);
-  
+
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
   glTexImage2D(GL_TEXTURE_2D, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
 }
+/*
+void unit_cube_texture(GLuint* tex, GLenum format) {
+  glGenTextures(1, tex);
+  glBindTexture(GL_TEXTURE_2D, *tex);
 
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});  
+}
+*/
 void load_shaders(render_t* render) {
   render->fill.shader = shader_new(read_file("shaders/fill.frag"), read_file("shaders/fill.vert"));
   render->fill.color = glGetUniformLocation(render->fill.shader.prog, "color");
+
+  render->cubemap.shader = shader_new(read_file("shaders/cubemap.frag"), read_file("shaders/cubemap.vert"));
+  render->cubemap.tex = glGetUniformLocation(render->cubemap.shader.prog, "tex");
 
   render->tex.shader = shader_new(read_file("shaders/tex.frag"), read_file("shaders/tex.vert"));
   render->tex.tex = glGetUniformLocation(render->tex.shader.prog, "tex");
@@ -238,9 +303,18 @@ void load_shaders(render_t* render) {
   render->pbr.tex.normal = glGetUniformLocation(render->pbr.shader.prog, "normaltex");
   render->pbr.tex.orm = glGetUniformLocation(render->pbr.shader.prog, "ormtex");
 
+  render->pbr.local_env = glGetUniformLocation(render->pbr.shader.prog, "local_env");
+  render->pbr.global_env = glGetUniformLocation(render->pbr.shader.prog, "global_env");
+
   GLuint pbr_lighting = glGetUniformBlockIndex(render->pbr.shader.prog, "lighting");
   glUniformBlockBinding(render->pbr.shader.prog, pbr_lighting, 1);
 }
+
+void add_rect(object* obj, vec3 width, vec3 height, vec2 tstart, vec2 tend);
+void add_cube(object* obj, vec3 start, vec3 end);
+
+object object_new();
+void object_init(object* obj);
 
 render_t render_new(vec2 bounds) {
   render_t render;
@@ -255,29 +329,45 @@ render_t render_new(vec2 bounds) {
   render.dirlights = vector_new(sizeof(dirlight));
   glm_vec4_zero(render.ambient);
 
-  //enable blending multisampling and depth testing
+  render.ibl.local_env_enabled = 0;
+  render.ibl.global_env_enabled = 0;
+
+  //enable
   glEnable(GL_BLEND);
   glEnable(GL_MULTISAMPLE);
-  
+  glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);  
+
   glEnable(GL_DEPTH_TEST);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  
+
+  //set texture fbo for processing textures
+  glGenFramebuffers(1, &render.tex_fbo);
+
   //set default texture
   unit_texture(&render.default_tex, GL_RGBA);
   unit_texture(&render.default_texrgb, GL_RGB);
 
-  
-  
+  load_shaders(&render);
+
+  //set cube and rect
+  render.full_cube = object_new();
+  add_cube(&render.full_cube, (vec3){-1,-1,-1}, (vec3){1,1,1});
+  object_init(&render.full_cube);
+
+  render.full_rect = object_new();
+  add_rect(&render.full_rect, (vec3){-1, -1, 0}, (vec3){1, 1, 0}, (vec2){0,0}, (vec2){1,1});
+  object_init(&render.full_rect);
+
   glGenBuffers(1, &render.uniform_buffer);
   glBindBuffer(GL_UNIFORM_BUFFER, render.uniform_buffer);
   glBufferData(GL_UNIFORM_BUFFER, sizeof(mat4[2]), NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 0, render.uniform_buffer);
-  
+
   glGenBuffers(1, &render.lighting_buffer);
   glBindBuffer(GL_UNIFORM_BUFFER, render.lighting_buffer);
   glBufferData(GL_UNIFORM_BUFFER, sizeof(lighting), NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 1, render.lighting_buffer);
-  
+
   if (FT_Init_FreeType(&render.freetype)) errx("freetype failed to load");
 
   return render;
@@ -306,7 +396,7 @@ void object_init(object* obj) {
 
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)offsetof(vertex, pos));
   glEnableVertexAttribArray(0);
-  
+
   glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)offsetof(vertex, normal));
   glEnableVertexAttribArray(1);
 
@@ -328,10 +418,10 @@ void add_tangent(vertex* first, vertex* second, vertex* third) {
 
   glm_vec3_sub(first->pos, second->pos, second_dir);
   glm_vec3_sub(first->pos, third->pos, third_dir);
-  
+
   vec2 second_uv;
   vec2 third_uv;
-  
+
   glm_vec2_sub(first->texpos, second->texpos, second_uv);
   glm_vec2_sub(first->texpos, third->texpos, third_uv);
 
@@ -369,35 +459,165 @@ void add_tangents(object* obj) {
   }
 }
 
-GLuint load_hdri(render_t* render, char* hdri) {
+#define CUBEMAP_RES 512
+
+void convolve_side(GLenum side, tex_t cubemap, float* data) {
+  float* prev_img = data;
+  int level=1;
+
+  for (int new_c = CUBEMAP_RES/2; new_c >= 1; new_c /= 2) {
+    float* img = heap(new_c*new_c*sizeof(float)*3);
+
+    for (int x=0; x<new_c; x++) {
+      for (int y=0; y<new_c; y++) {
+	//box average
+	float* avg = &img[(x*new_c + y)*3];
+	glm_vec3_zero(avg);
+	glm_vec3_addadd(&prev_img[(y*4*new_c + x*2)*3], &prev_img[(y*4*new_c + x*2 + 1)*3], avg);
+	glm_vec3_addadd(&prev_img[((2*y+1)*2*new_c + x*2)*3], &prev_img[((2*y+1)*2*new_c + x*2 + 1)*3], avg);
+	glm_vec3_divs(avg, 4, avg);
+      }
+    }
+
+    glTexImage2D(side, level, GL_RGB16F, new_c, new_c, 0, GL_RGB, GL_FLOAT, img);
+
+    if (prev_img != data) drop(prev_img);
+    prev_img = img;
+
+    level++;
+  }
+}
+
+tex_t load_hdri(render_t* render, char* hdri) {
   int w, h, channels;
 
   stbi_set_flip_vertically_on_load(1);
-  unsigned char* data = stbi_load(hdri, &w, &h, &channels, 3);
+  float* data = stbi_loadf(hdri, &w, &h, &channels, 3);
+	stbi_set_flip_vertically_on_load(0);
   if (!data) errx("invalid hdri %s", hdri);
 
-  GLuint gltex;
-  glGenTextures(1, &gltex);
-  glBindTexture(GL_TEXTURE_2D, gltex);
-  
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  // ...
+  int side_size = CUBEMAP_RES * CUBEMAP_RES * 3 * sizeof(float);
+  float* up = heap(side_size);
+  float* down = heap(side_size);
+  float* left = heap(side_size);
+  float* front = heap(side_size);
+  float* right = heap(side_size);
+  float* back = heap(side_size);
 
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  float* sides[] = {left, front, right, back, NULL};
 
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, w, h, 0, GL_RGB, GL_FLOAT, data);
-  
-  return gltex;
+  float wf = (float)w-1;
+  float hf = (float)h-1;
+
+  float cf = CUBEMAP_RES;
+  float ch = CUBEMAP_RES/2;
+
+  float corner = 1.0/3.0;
+
+  //render poles
+  for (int y=0; y<CUBEMAP_RES; y++) {
+    for (int x=0; x<CUBEMAP_RES; x++) {
+      vec2 where = {((float)x - ch)/ch, (float)(y - ch)/ch};
+
+      float dist = sinf(fabsf(glm_vec2_norm(where)));
+
+      glm_vec2_normalize(where);
+      float angle = acosf(where[0])/(2*M_PI);
+      if (where[1] < 0) angle = 1.0-angle;
+
+      vec2 pos = {angle, 1.0 - dist*corner};
+
+      int in_x=(int)(pos[0]*wf) - 1, in_y=(int)(pos[1]*hf) - 1;
+      memcpy(&up[3*(CUBEMAP_RES*y + x)], &data[3*(in_y*w + in_x)], sizeof(float[3]));
+    }
+  }
+
+  for (int y=0; y<CUBEMAP_RES; y++) {
+    for (int x=0; x<CUBEMAP_RES; x++) {
+      vec2 where = {((float)x - ch)/ch, -(float)(y - ch)/ch};
+
+      float dist = sinf(fabsf(glm_vec2_norm(where)));
+
+      glm_vec2_normalize(where);
+      float angle = acosf(where[0])/(2*M_PI);
+      if (where[1] < 0) angle = 1.0-angle;
+
+      vec2 pos = {angle, dist*corner};
+
+      int in_x=(int)(pos[0]*wf), in_y=(int)(pos[1]*hf);
+      memcpy(&down[3*(CUBEMAP_RES*y + x)], &data[3*(in_y*w + in_x)], sizeof(float[3]));
+    }
+  }
+
+  float angle_offset = 0;
+  for (float** side = sides; *side; side++) {
+    for (int x = 0; x < CUBEMAP_RES; x++) {
+      for (int y = 0; y < CUBEMAP_RES; y++) {
+	//invert texture coordinates (rows are written top to bottom, opengl reads bottom to top)
+	vec2 where = {-((float)x-ch)/ch, (float)y/cf};
+
+	float y_angle = asinf(corner + corner*where[1]);
+	float x_coeff = 3/4 + 1/(4*cos(y_angle));
+
+	vec2 pos = {angle_offset + (x_coeff*where[0] + 1)/2, corner + corner*(1.0-where[1])};
+
+	int in_x = (int) (pos[0] * wf), in_y = (int) (pos[1] * hf);
+	memcpy(&((*side)[3 * (CUBEMAP_RES * y + x)]), &data[3 * (in_y * w + in_x)], sizeof(float[3]));
+      }
+    }
+
+    angle_offset += 1.0/4.0;
+  }
+
+
+  drop(data);
+
+  tex_t tex;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, up);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, down);
+
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, left);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, right);
+
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, front);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, back);
+
+  convolve_side(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, tex, up);
+  convolve_side(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, tex, down);
+  convolve_side(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, tex, left);
+  convolve_side(GL_TEXTURE_CUBE_MAP_POSITIVE_X, tex, right);
+  convolve_side(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, tex, front);
+  convolve_side(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, tex, back);
+  glerr();
+
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glerr();
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glerr();
+
+  drop(up);
+  drop(down);
+
+  drop(left);
+  drop(front);
+  drop(right);
+  drop(back);
+
+  return tex;
 }
 
 void render_object(render_t* render, object* obj) {
   glBindBuffer(GL_UNIFORM_BUFFER, render->uniform_buffer);
-  
+
   if (render->space_current != obj->space) {
     vec4* spacemat = obj->space==spacescreen ? render->spacescreen : render->space3d;
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(mat4), spacemat);
-    
+
     vec4* cam = obj->space==spacescreen ? GLM_MAT4_IDENTITY : render->cam;
     glBufferSubData(GL_UNIFORM_BUFFER, sizeof(mat4), sizeof(mat4), cam);
 
@@ -409,6 +629,7 @@ void render_object(render_t* render, object* obj) {
   obj_shader* shad;
   switch (obj->shader) {
     case shader_tex: shad = &render->tex.shader; break;
+    case shader_cubemap: shad = &render->cubemap.shader; break;
     case shader_txt: shad = &render->txt.shader; break;
     case shader_fill: shad = &render->fill.shader; break;
     case shader_pbr: shad = &render->pbr.shader; break;
@@ -418,52 +639,71 @@ void render_object(render_t* render, object* obj) {
 
   switch (obj->shader) {
     case shader_tex: {
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->texture);
-      glUniform1i(render->tex.tex, 0);
-      break;
-    }
+		       glActiveTexture(GL_TEXTURE0);
+		       glBindTexture(GL_TEXTURE_2D, obj->texture);
+		       glUniform1i(render->tex.tex, 0);
+		       break;
+		     }
+    case shader_cubemap: {
+			   glActiveTexture(GL_TEXTURE0);
+			   glBindTexture(GL_TEXTURE_CUBE_MAP, obj->texture);
+			   glUniform1i(render->cubemap.tex, 0);
+			   break;
+			 }
     case shader_fill: {
-      glUniform4fv(render->fill.color, 1, obj->col);
-      break;
-    }
+			glUniform4fv(render->fill.color, 1, obj->col);
+			break;
+		      }
     case shader_txt: {
-      glUniform4fv(render->txt.color, 1, obj->col);
-      
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->texture);
-      glUniform1i(render->txt.tex, 0);
-      break;
-    }
+		       glUniform4fv(render->txt.color, 1, obj->col);
+
+		       glActiveTexture(GL_TEXTURE0);
+		       glBindTexture(GL_TEXTURE_2D, obj->texture);
+		       glUniform1i(render->txt.tex, 0);
+		       break;
+		     }
     case shader_pbr: {
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.diffuse);
-      glUniform1i(render->pbr.tex.diffuse, 0);
-      glActiveTexture(GL_TEXTURE1);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.emissive);
-      glUniform1i(render->pbr.tex.emissive, 1);
-      glActiveTexture(GL_TEXTURE2);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.normal);
-      glUniform1i(render->pbr.tex.normal, 2);
-      glActiveTexture(GL_TEXTURE3);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.orm);
-      glUniform1i(render->pbr.tex.orm, 3);
+		       glActiveTexture(GL_TEXTURE0);
+		       glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.diffuse);
+		       glUniform1i(render->pbr.tex.diffuse, 0);
+		       glActiveTexture(GL_TEXTURE1);
+		       glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.emissive);
+		       glUniform1i(render->pbr.tex.emissive, 1);
+		       glActiveTexture(GL_TEXTURE2);
+		       glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.normal);
+		       glUniform1i(render->pbr.tex.normal, 2);
+		       glActiveTexture(GL_TEXTURE3);
+		       glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.orm);
+		       glUniform1i(render->pbr.tex.orm, 3);
+		       glUniform4fv(render->pbr.color, 1, obj->pbr.col);
 
-      glUniform4fv(render->pbr.color, 1, obj->pbr.col);
-      glUniform3fv(render->pbr.emissive, 1, obj->pbr.emissive);
-      glUniform1f(render->pbr.metal, obj->pbr.metal);
-      glUniform1f(render->pbr.rough, obj->pbr.rough);
-      glUniform1f(render->pbr.occlusion, obj->pbr.occlusion);
+		       glUniform3fv(render->pbr.emissive, 1, obj->pbr.emissive);
+		       glUniform1f(render->pbr.metal, obj->pbr.metal);
+		       glUniform1f(render->pbr.rough, obj->pbr.rough);
+		       glUniform1f(render->pbr.occlusion, obj->pbr.occlusion);
 
-      break;
-    }
+		       if (render->ibl.global_env_enabled) {
+									 glActiveTexture(GL_TEXTURE4);
+									 glBindTexture(GL_TEXTURE_CUBE_MAP, render->global_env);
+		       }
+
+		       if (render->ibl.local_env_enabled) {
+									 glActiveTexture(GL_TEXTURE5);
+									 glBindTexture(GL_TEXTURE_CUBE_MAP, render->local_env);
+		       }
+
+		       glUniform1i(render->pbr.global_env, 4);
+		       glUniform1i(render->pbr.local_env, 5);
+
+		       break;
+		     }
   }
 
   glerr();
-  
+
   glUniformMatrix4fv(shad->transform, 1, GL_FALSE, obj->transform[0]);
   glerr();
-  
+
   glBindVertexArray(obj->vao);
   glerr();
 
@@ -490,6 +730,8 @@ void render_reset(render_t* render) {
   enabled = render->dirlights.length;
   glBufferSubData(GL_UNIFORM_BUFFER, offsetof(lighting, dirlights_enabled), sizeof(int), &enabled);
   glBufferSubData(GL_UNIFORM_BUFFER, offsetof(lighting, dirlights), render->dirlights.size * render->dirlights.length, render->dirlights.data);
+  
+  glBufferSubData(GL_UNIFORM_BUFFER, offsetof(lighting, ibl), sizeof(ibl_lighting), &render->ibl);
 }
 
 void render_setambient(render_t* render, vec4 ambient) {
@@ -524,31 +766,45 @@ void object_free(object* obj) {
 
   switch (obj->shader) {
     case shader_pbr: {
-      glDeleteTextures(1, &obj->pbr.tex.diffuse);
-      glDeleteTextures(1, &obj->pbr.tex.emissive);
-      glDeleteTextures(1, &obj->pbr.tex.normal);
-      glDeleteTextures(1, &obj->pbr.tex.orm);
-      break;
-    };
+		       glDeleteTextures(1, &obj->pbr.tex.diffuse);
+		       glDeleteTextures(1, &obj->pbr.tex.emissive);
+		       glDeleteTextures(1, &obj->pbr.tex.normal);
+		       glDeleteTextures(1, &obj->pbr.tex.orm);
+		       break;
+		     };
     case shader_tex:
+    case shader_cubemap:
     case shader_txt: {
-      glDeleteTextures(1, &obj->texture);
-      break;
-    }
+		       glDeleteTextures(1, &obj->texture);
+		       break;
+		     }
 
     default:;
   }
 }
 
-void add_rect(object* obj, vec3 start, vec2 end, vec2 tstart, vec2 tend) {
+void add_rect(object* obj, vec3 start, vec3 end, vec2 tstart, vec2 tend) {
+  vertex* verts;
+
   //cglm arrays are hell
-  vertex verts[4] = {
-    {.pos={start[0], start[1], start[2]}, .texpos={tstart[0], tstart[1]}},
-    {.pos={start[0]+end[0], start[1], start[2]}, .texpos={tstart[0]+tend[0], tstart[1]}},
-    {.pos={start[0], start[1]+end[1], start[2]}, .texpos={tstart[0], tstart[1]+tend[1]}},
-    {.pos={start[0]+end[0], start[1]+end[1], start[2]}, .texpos={tstart[0]+tend[0], tstart[1]+tend[1]}},
-  };
-  
+  if (end[1] == 0) {
+    //x-z plane
+    verts = (vertex[]){
+      {.pos={start[0], start[1], start[2]}, .texpos={tstart[0], tstart[1]}},
+	{.pos={start[0]+end[0], start[1], start[2]}, .texpos={tstart[0]+tend[0], tstart[1]}},
+	{.pos={start[0], start[1], start[2]+end[2]}, .texpos={tstart[0], tstart[1]+tend[1]}},
+	{.pos={start[0]+end[0], start[1], start[2]+end[2]}, .texpos={tstart[0]+tend[0], tstart[1]+tend[1]}},
+    };
+  } else {
+    //x-y or y-z
+    verts = (vertex[]){
+      {.pos={start[0], start[1], start[2]}, .texpos={tstart[0], tstart[1]}},
+	{.pos={start[0]+end[0], start[1], start[2]+end[2]}, .texpos={tstart[0]+tend[0], tstart[1]}},
+	{.pos={start[0], start[1]+end[1], start[2]}, .texpos={tstart[0], tstart[1]+tend[1]}},
+	{.pos={start[0]+end[0], start[1]+end[1], start[2]+end[2]}, .texpos={tstart[0]+tend[0], tstart[1]+tend[1]}},
+    };
+  }
+
   unsigned long i = obj->vertices.length;
   GLuint elems[] = {i, i+1, i+2, i+1, i+2, i+3};
 
@@ -556,11 +812,55 @@ void add_rect(object* obj, vec3 start, vec2 end, vec2 tstart, vec2 tend) {
   vector_stockcpy(&obj->elements, 6, elems);
 }
 
+//does not handle textures, extrudes a rectangle from last edge
+void extrude(object* obj, vec3 offset) {
+  vertex* edge[] = {vector_get(&obj->vertices, obj->vertices.length-2), vector_get(&obj->vertices, obj->vertices.length-1)};
+  vertex verts[2];
+  glm_vec3_add(edge[0]->pos, offset, verts[0].pos);
+  glm_vec3_add(edge[1]->pos, offset, verts[1].pos);
+
+  unsigned long i = obj->vertices.length;
+  GLuint elems[] = {i-2, i-1, i+1, i-2, i, i+1};
+
+  vector_stockcpy(&obj->vertices, 2, verts);
+  vector_stockcpy(&obj->elements, 6, elems);
+}
+
+void add_cube(object* obj, vec3 start, vec3 end) {
+  add_rect(obj, start, (vec3){end[0], end[1], 0}, (vec2){0,0}, (vec2){1,1});
+  extrude(obj, (vec3){0,0,end[2]});
+  extrude(obj, (vec3){0,-end[1],0});
+  extrude(obj, (vec3){0,0,-end[2]});
+
+  //add sides
+  add_rect(obj, (vec3){start[0]+end[0], start[1], start[2]}, (vec3){0,end[1],end[2]}, (vec2){0,0}, (vec2){1,1});
+  add_rect(obj, (vec3){start[0], start[1], start[2]}, (vec3){0,end[1],end[2]}, (vec2){0,0}, (vec2){1,1});
+}
+
+void process_texture(render_t* render, char cubemap, tex_t tex, int level, tex_shader* shad) {
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glClearColor(0,0,0,0);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, cubemap ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D, tex, level);
+
+  glUseProgram(shad->prog);
+
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(cubemap ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D, tex);
+  glUniform1i(shad->tex, 0);
+
+  glBindVertexArray(cubemap ? render->full_cube.vao : render->full_rect.vao);
+  glDrawElements(GL_TRIANGLES, cubemap ? render->full_cube.elements.length : render->full_rect.elements.length, GL_UNSIGNED_INT, 0);
+
+
+}
+
 object rect(float width, float height, vec4 col) {
   object obj = object_new();
   glm_vec4_ucopy(col, obj.col);
 
-  add_rect(&obj, (vec3){0,0,0}, (vec2){width,height}, (vec2){0,0}, (vec2){1,1});
+  add_rect(&obj, (vec3){0,0,0}, (vec3){width,height,0}, (vec2){0,0}, (vec2){1,1});
 
   object_init(&obj);
 
@@ -597,7 +897,7 @@ font_t font_new(render_t* render, char* fontpath, unsigned size) {
 
   for (int i=32; i<128; i++) {
     if (FT_Load_Char(face, i, FT_LOAD_RENDER))
-        errx("failed to render character %c", i);
+      errx("failed to render character %c", i);
 
     if (!face->glyph->bitmap.buffer) continue;
     if (face->glyph->bitmap.rows > font.height)
@@ -624,7 +924,7 @@ font_t font_new(render_t* render, char* fontpath, unsigned size) {
     atp->x = x;
 
     if (FT_Load_Char(face, i, FT_LOAD_RENDER))
-        errx("failed to render character %c", i);
+      errx("failed to render character %c", i);
 
     glm_vec2_copy((vec2){face->glyph->bitmap.width, face->glyph->bitmap.rows}, atp->bounds);
 
@@ -640,7 +940,7 @@ font_t font_new(render_t* render, char* fontpath, unsigned size) {
     }
 
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, 0, face->glyph->bitmap.width, face->glyph->bitmap.rows,
-      GL_RED, GL_UNSIGNED_BYTE, face->glyph->bitmap.buffer);
+	GL_RED, GL_UNSIGNED_BYTE, face->glyph->bitmap.buffer);
     glerr();
 
     x += face->glyph->bitmap.width + 1; //padding
@@ -656,17 +956,17 @@ object text(font_t* font, char* txt, vec4 col) {
   obj.shader = shader_txt;
   obj.texture = font->atlas;
   glm_vec4_ucopy(col, obj.col);
-  
+
   obj.space = spacescreen;
-  
+
   float x=0;
   for (int i=0; i<strlen(txt); i++) {
     atlas_pos atp = font->chars[txt[i]-32];
 
     if (!atp.empty) {
       add_rect(&obj, (vec3){x+atp.x_bearing, (float)atp.y_bearing-atp.bounds[1], 0}, atp.bounds,
-        (vec2){(float)atp.x / (float)font->width, atp.bounds[1] / (float)font->height},
-        (vec2){atp.bounds[0] / (float)font->width, -atp.bounds[1] / (float)font->height});
+	  (vec2){(float)atp.x / (float)font->width, atp.bounds[1] / (float)font->height},
+	  (vec2){atp.bounds[0] / (float)font->width, -atp.bounds[1] / (float)font->height});
     }
 
     x += atp.x_advance;
@@ -680,10 +980,8 @@ void font_free(font_t* font) {
   glDeleteTextures(1, &font->atlas);
 }
 
-#define DEFAULT_ATTRIBUTE_COUNT 2 //attributes without textures
-
-GLuint load_gltf_texture(cgltf_texture* tex, GLenum format) {
-  GLuint gltex;
+tex_t load_gltf_texture(cgltf_texture* tex, GLenum format) {
+  tex_t gltex;
   glGenTextures(1, &gltex);
   glBindTexture(GL_TEXTURE_2D, gltex);
 
@@ -702,7 +1000,7 @@ GLuint load_gltf_texture(cgltf_texture* tex, GLenum format) {
 
   if (strcmp(tex->image->mime_type, "image/png")==0) {
     unsigned err;
-    
+
     data = stbi_load_from_memory(tex->image->buffer_view->buffer->data + tex->image->buffer_view->offset, tex->image->buffer_view->size, &w, &h, &channels, format == GL_RGB ? 3 : 4);
 
     if (!data) {
@@ -732,9 +1030,9 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
     for (int p=0; p<node->mesh->primitives_count; p++) {
       cgltf_primitive* prim = &node->mesh->primitives[p];
       if (!prim->material) {
-        errx("primitive in %s does not have material", node->name);
+	errx("primitive in %s does not have material", node->name);
       }
-      
+
       cgltf_texture_view* basetex = &prim->material->pbr_metallic_roughness.base_color_texture;
       cgltf_texture_view* normaltex = &prim->material->normal_texture;
       cgltf_texture_view* emissivetex = &prim->material->emissive_texture;
@@ -742,15 +1040,15 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
 
       object obj = object_new();
       obj.shader = shader_pbr;
-      
+
       if (basetex->texture) obj.pbr.tex.diffuse = load_gltf_texture(basetex->texture, GL_RGBA);
-        else obj.pbr.tex.diffuse = render->default_tex;
+      else obj.pbr.tex.diffuse = render->default_tex;
       if (normaltex->texture) obj.pbr.tex.normal = load_gltf_texture(normaltex->texture, GL_RGB);
-        else obj.pbr.tex.normal = render->default_texrgb;
+      else obj.pbr.tex.normal = render->default_texrgb;
       if (emissivetex->texture) obj.pbr.tex.emissive = load_gltf_texture(emissivetex->texture, GL_RGB);
-        else obj.pbr.tex.emissive = render->default_texrgb;
+      else obj.pbr.tex.emissive = render->default_texrgb;
       if (orm->texture) obj.pbr.tex.orm = load_gltf_texture(orm->texture, GL_RGBA);
-        else obj.pbr.tex.orm = render->default_texrgb;
+      else obj.pbr.tex.orm = render->default_texrgb;
 
       glm_vec4_ucopy(prim->material->pbr_metallic_roughness.base_color_factor, obj.pbr.col);
       obj.pbr.metal = prim->material->pbr_metallic_roughness.metallic_factor;
@@ -764,51 +1062,51 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
       int tex = -1;
 
       for (int a=0; a<prim->attributes_count; a++) {
-        cgltf_attribute* attr = &prim->attributes[a];
+	cgltf_attribute* attr = &prim->attributes[a];
 
-        if (obj.vertices.length < attr->data->count) {
-          vector_stock(&obj.vertices, attr->data->count-obj.vertices.length);
-        }
+	if (obj.vertices.length < attr->data->count) {
+	  vector_stock(&obj.vertices, attr->data->count-obj.vertices.length);
+	}
 
-        if (strcmp(attr->name, "POSITION")==0) {
-          float positions[3*obj.vertices.length];
-          cgltf_accessor_unpack_floats(attr->data, positions, 3*obj.vertices.length);
+	if (strcmp(attr->name, "POSITION")==0) {
+	  float positions[3*obj.vertices.length];
+	  cgltf_accessor_unpack_floats(attr->data, positions, 3*obj.vertices.length);
 
-          vector_iterator iter = vector_iterate(&obj.vertices);
-          while (vector_next(&iter)) {
-            glm_vec3_copy(&positions[(iter.i-1)*3], ((vertex*)iter.x)->pos);
-          }
-        } else if (strcmp(attr->name, "NORMAL")==0) {
-          float normals[3*obj.vertices.length];
-          cgltf_accessor_unpack_floats(attr->data, normals, 3*obj.vertices.length);
+	  vector_iterator iter = vector_iterate(&obj.vertices);
+	  while (vector_next(&iter)) {
+	    glm_vec3_copy(&positions[(iter.i-1)*3], ((vertex*)iter.x)->pos);
+	  }
+	} else if (strcmp(attr->name, "NORMAL")==0) {
+	  float normals[3*obj.vertices.length];
+	  cgltf_accessor_unpack_floats(attr->data, normals, 3*obj.vertices.length);
 
-          vector_iterator iter = vector_iterate(&obj.vertices);
-          while (vector_next(&iter)) {
-            glm_vec3_copy(&normals[(iter.i-1)*3], ((vertex*)iter.x)->normal);
-          }
-        } else {
-          if (tex>0) errx("texture coordinate already defined for %s", node->name);
-          if (sscanf(attr->name, "TEXCOORD_%i", &tex)==EOF)
-            errx("could not read gltf: attribute %s not defined", attr->name);
+	  vector_iterator iter = vector_iterate(&obj.vertices);
+	  while (vector_next(&iter)) {
+	    glm_vec3_copy(&normals[(iter.i-1)*3], ((vertex*)iter.x)->normal);
+	  }
+	} else {
+	  if (tex>0) errx("texture coordinate already defined for %s", node->name);
+	  if (sscanf(attr->name, "TEXCOORD_%i", &tex)==EOF)
+	    errx("could not read gltf: attribute %s not defined", attr->name);
 
-          float texpositions[2*obj.vertices.length];
-          cgltf_accessor_unpack_floats(attr->data, texpositions, 2*obj.vertices.length);
+	  float texpositions[2*obj.vertices.length];
+	  cgltf_accessor_unpack_floats(attr->data, texpositions, 2*obj.vertices.length);
 
-          vector_iterator iter = vector_iterate(&obj.vertices);
-          while (vector_next(&iter)) {
-            float* texpos = &texpositions[(iter.i-1)*2];
-            texpos[1] = 1.0 - texpos[1];
-            
-            glm_vec2_copy(texpos, ((vertex*)iter.x)->texpos);
-          }
-        }
+	  vector_iterator iter = vector_iterate(&obj.vertices);
+	  while (vector_next(&iter)) {
+	    float* texpos = &texpositions[(iter.i-1)*2];
+	    texpos[1] = 1.0 - texpos[1];
+
+	    glm_vec2_copy(texpos, ((vertex*)iter.x)->texpos);
+	  }
+	}
       }
 
       vector_stock(&obj.elements, prim->indices->count);
 
       vector_iterator elem_iter = vector_iterate(&obj.elements);
       while (vector_next(&elem_iter)) {
-        *((GLuint*)elem_iter.x) = cgltf_accessor_read_index(prim->indices, elem_iter.i-1);
+	*((GLuint*)elem_iter.x) = cgltf_accessor_read_index(prim->indices, elem_iter.i-1);
       }
 
       object_init(&obj);
@@ -830,7 +1128,7 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
       pointlight* pointl = vector_push(&sc->pointlights);
       glm_vec3_copy(node->light->color, pointl->color);
       glm_vec3_copy(node->translation, transform[3]); //copy from w column
-      
+
       pointl->color[3] = node->light->intensity;
       pointl->dist = node->light->range;
     }
