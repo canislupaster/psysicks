@@ -39,3 +39,6 @@ _deps
 
 out
 build
+
+.clangd
+.DS_Store
