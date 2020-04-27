@@ -1,0 +1,17 @@
+{
+  "configurations": {
+    "fps: Launch": {
+      "adapter": "vscode-cpptools",
+      "configuration": {
+        "name": "fps",
+        "type": "cppdbg",
+        "request": "launch",
+        "program": "${workspaceRoot}/build/fps",
+        "externalConsole": true,
+        "MIMode": "lldb",
+				"cwd": "${workspaceRoot}",
+				"stopAtEntry": true
+      }
+    }
+	}
+}

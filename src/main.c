@@ -17,6 +17,8 @@ const char* CFG_WIDTH = "width";
 const char* CFG_HEIGHT = "height";
 const char* CFG_VSYNC = "vsync";
 
+const char* CFG_MOUSE_SENSITIVITY = "mouse_sensitivity";
+
 map_t default_configuration() {
   map_t cfg = map_new();
   map_configure_string_key(&cfg, sizeof(config_val));
@@ -26,6 +28,7 @@ map_t default_configuration() {
   cfg_add(&cfg, CFG_WIDTH, cfg_num, (cfg_data)1024);
   cfg_add(&cfg, CFG_HEIGHT, cfg_num, (cfg_data)512);
   cfg_add(&cfg, CFG_VSYNC, cfg_num, (cfg_data)1);
+  cfg_add(&cfg, CFG_MOUSE_SENSITIVITY, cfg_float, (cfg_data)0.5);
 
   return cfg;
 }
@@ -52,6 +55,7 @@ int main(int argc, char** argv) {
   int width = *cfg_get(&cfg, CFG_WIDTH);
   int height = *cfg_get(&cfg, CFG_HEIGHT);
   int vsync = *cfg_get(&cfg, CFG_VSYNC);
+  int mouse_sensitivity = *cfg_get(&cfg, CFG_MOUSE_SENSITIVITY);
 
   SDL_Window* window = SDL_CreateWindow("fps", x, y, width, height,
     SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
@@ -85,10 +89,9 @@ int main(int argc, char** argv) {
   // sdlerr();
   // glerr();
 
-  gltf_scene sc = load_gltf(&render, "untitled.glb");
+  gltf_scene sc = load_gltf(&render, "map.glb");
   // gltf_scene cube_sc = load_gltf(&render, "cube.glb");
   
-  object* scobj = vector_get(&sc.objects, 0);
   // object cube = object_new();
   // add_cube(&cube, (vec3){-1, -1, -1}, (vec3){2, 2, 2});
 
@@ -100,27 +103,59 @@ int main(int argc, char** argv) {
   // r2.shader = shader_tex;
   // r2.texture = scobj->pbr.tex.diffuse;
 
-  cam_setpos(&render, (vec3){0,0,-2.5});
+	map_iterator iter = map_iterate(&sc.cameras);
+	map_next(&iter);
+	printf("%s - %p\n", *(char**)iter.key, iter.x);
 
+	vec3 player_pos = {0, 0, -2};
+	glm_vec3_copy(((vec4*)iter.x)[3], player_pos);
+
+	vec2 player_rot = {0, 0};
+
+	iter = map_iterate(&sc.objects);
+	while (map_next(&iter)) {
+		object* obj = iter.x;
+	}
+
+	//glm_mat4_ucopy(iter.x, render.cam);
   //vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, 1, 0}, .color=WHITE});
 
 	render.ibl.global_env_enabled = 1;
+	//glm_vec3_zero(render.ibl.local_envpos);
+	//render.ibl.local_envdist = 20;
 	render.global_env = tex;
 
   // vector_add(&sc.dirlights, &render.dirlights);
-  // vector_add(&sc.pointlights, &render.pointlights);
 
-  //render_setambient(&render, (vec4){0.2,0.2,0.2,0.2});
+  //render_setambient(&render, (vec4){0.5,0.5,0.5,0.5});
 
   unsigned long frame = 0;
+	unsigned int tick = 0;
+
+	int mouse_captured = 0;
+
   while (1) {
+		glm_mat4_identity(render.cam);
+		glm_rotate_x(render.cam, player_rot[1], render.cam);
+		glm_rotate_y(render.cam, player_rot[0], render.cam);
+		glm_translate(render.cam, player_pos);
+
     frame++;
     render_reset(&render);
     
-    render_object(&render, scobj);
+		iter = map_iterate(&sc.objects);
+		while (map_next(&iter)) {
+			object* obj = iter.x;
+			mat4 transform; //aligned
+			glm_mat4_ucopy(obj->transform, transform);
+			//glm_rotate_x(in_transform, 0.2, out_transform);
+			glm_rotate(transform, M_PI/300, (vec3){0.1, 0.1, 0.0});
+			glm_mat4_ucopy(transform, obj->transform);
+			render_object(&render, obj);
+		}
 
-  	glm_rotate(scobj->transform, M_PI/300, (vec3){0.1, 0.0, 0.0});
-    glm_rotate(scobj->transform, -M_PI/400, (vec3){0.0, 1.0, 0.0});
+  	//glm_rotate(scobj->transform, M_PI/300, (vec3){0.1, 0.0, 0.0});
+    //glm_rotate(scobj->transform, -M_PI/400, (vec3){0.0, 1.0, 0.0});
 
     // render_object(&render, &r2);
     // vector_iterator obj_iter = vector_iterate(&sc.objects);
@@ -140,6 +175,18 @@ int main(int argc, char** argv) {
     while (SDL_PollEvent(&ev)) {
       switch (ev.type) {
         case SDL_QUIT: close=1; break;
+				case SDL_MOUSEBUTTONUP: {
+					SDL_SetRelativeMouseMode(SDL_TRUE);
+					mouse_captured = 1;
+					break;
+				}
+				case SDL_MOUSEMOTION: {
+					if (!mouse_captured) break;
+					player_rot[0] += (float)ev.motion.xrel/render.bounds[0];
+					player_rot[1] += (float)ev.motion.yrel/render.bounds[1];
+
+					break;
+				}
         case SDL_WINDOWEVENT: {
           switch (ev.window.event) {
             case SDL_WINDOWEVENT_SIZE_CHANGED: {
@@ -154,14 +201,31 @@ int main(int argc, char** argv) {
           break;
         }
         case SDL_KEYDOWN: {
-          if (ev.key.keysym.sym == SDLK_r) {
-            load_shaders(&render);
-          }
+          switch (ev.key.keysym.sym) {
+						case SDLK_r: load_shaders(&render); break;
+            case SDLK_ESCAPE: {
+							SDL_SetRelativeMouseMode(SDL_FALSE);
+							mouse_captured = 0;
+							break;
+						}
+					}
         }
       }
     }
 
     if (close) break;
+
+		unsigned current_tick = SDL_GetTicks();
+		unsigned delta = current_tick - tick;
+		tick = current_tick;
+
+		float deltaf = (float)delta/60.0;
+	
+		unsigned const char* keys = SDL_GetKeyboardState(NULL);
+		if (keys[SDL_SCANCODE_W]) {
+			glm_vec3_muladds((vec3){-sinf(player_rot[0]), sinf(player_rot[1]), cosf(player_rot[0])}, deltaf, player_pos);
+		}	
+
     SDL_Delay(1000/60);
   }
 

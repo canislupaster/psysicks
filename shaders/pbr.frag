@@ -97,8 +97,8 @@ vec4 do_light(vec3 light_angle, vec4 light_color, vec3 view_angle, float view_no
 
 	float spec = do_fresnel(is_metal, view_normal_angle)*ggx;
 
-  return color*view_shadow*light_shadow*normal_angle
-    * ((1.0-is_metal)*(1.0-spec) + light_color*light_color.a*spec);
+  return color*view_shadow*light_shadow*normal_angle*light_color.a
+    * ((1.0-is_metal) + is_metal*light_color*spec);
 }
 
 vec4 do_env(samplerCube envtex, float dist, float radius, vec3 displaced_normal, vec3 view_angle, float view_normal_angle, vec4 color, float is_metal, float is_rough) {
@@ -106,14 +106,14 @@ vec4 do_env(samplerCube envtex, float dist, float radius, vec3 displaced_normal,
  	float size = edge_dist/(PI*radius); //approximate projected hemisphere out of total radius
  	float mipmap = max(log2(size * is_rough)+ENV_MIPMAPS, 0);
 
- 	vec4 light_color = textureLod(envtex, displaced_normal, mipmap);
+ 	vec4 light_color = textureLod(envtex, 2*displaced_normal - view_angle, mipmap);
 
   float roughsq = pow(is_rough, 2);
   float view_shadow = view_normal_angle/(view_normal_angle*(1-roughsq) + roughsq);
 	float spec = do_fresnel(is_metal, view_normal_angle);
 
-  return color*view_shadow*view_normal_angle*((1.0-is_metal)*(1.0-spec) + light_color*spec);
-	//return vec4(size);
+ 	return color*view_shadow*view_normal_angle*light_color*(1.0-is_metal + is_metal*spec);
+	//return vec4(view_shadow)*spec*light_color*color;
   //return vec4(view_angle, 1.0)*0.5;
 	//return vec4(spec);
 }
@@ -128,9 +128,10 @@ void main() {
   vec3 normal_displace = normal*vec3(texture(normaltex, fragtexpos));
   vec3 displaced_normal = fragnormal + fragnormal*normal_displace.y + fragtangent*normal_displace.x + fragbitangent*normal_displace.z;
 
-  vec3 view_angle = normalize(vec3(transpose(cam)*vec4(fragpos, 1.0)));
+	vec4 view_to = cam*vec4(fragpos, 1.0);
+  vec3 view_angle = -normalize(vec3(view_to/view_to.w));
 
-  float view_normal_angle = dot(view_angle, displaced_normal);
+  float view_normal_angle = (1+dot(view_angle, displaced_normal))/2;
 	if (view_normal_angle<0) return;
 
   vec4 lit_color = vec4(0);
@@ -170,4 +171,5 @@ void main() {
   
   //tonemapping
   outColor = vec4(pow(outcolor_noalpha/(outcolor_noalpha+1), vec3(1/2.2)), color.a);
+	//outColor = vec4(view_angle, 1.0);
 }
