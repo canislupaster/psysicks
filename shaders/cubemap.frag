@@ -2,7 +2,7 @@
 
 uniform samplerCube tex;
 
-out vec4 outColor;
+layout(location=0) out vec4 outColor;
 
 in vec3 fragpos;
 

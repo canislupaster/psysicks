@@ -9,6 +9,8 @@
 
 #include "util.h"
 
+#define GLERR glerr(__LINE__, __FILE__)
+
 int vec3_iszero(vec3 vec) {
   return vec[0] == 0 && vec[1] == 0 && vec[2] == 0;
 }
@@ -24,10 +26,10 @@ void errx(char* s, ...) {
   exit(1);
 }
 
-void glerr() {
+void glerr(int line, char* file) {
   GLenum err;
   while ((err = glGetError()) && err!=0) {
-    printf("GL ERROR: ");
+    printf("GL ERROR: %s:%i\n", file, line);
 
     switch (err) {
       case GL_INVALID_ENUM: printf("%s", "GL_INVALID_ENUM"); break;

@@ -1,7 +1,7 @@
 #version 400 core
 
 #define MAX_LIGHTS 10
-#define ENV_MIPMAPS 8
+#define ENV_MIPMAPS_OFFSET 5
 
 // math.glsl
 #define PI 3.1415926538
@@ -62,7 +62,8 @@ in vec2 fragtexpos;
 in vec3 fragbitangent;
 in vec3 fragtangent;
 
-out vec4 outColor;
+layout(location=0) out vec4 outColor;
+layout(location=1) out vec4 outNormal;
 
 const float dielectric_baserefl = 0.04;
 
@@ -104,9 +105,11 @@ vec4 do_light(vec3 light_angle, vec4 light_color, vec3 view_angle, float view_no
 vec4 do_env(samplerCube envtex, float dist, float radius, vec3 displaced_normal, vec3 view_angle, float view_normal_angle, vec4 color, float is_metal, float is_rough) {
 	float edge_dist = radius-dist;
  	float size = edge_dist/(PI*radius); //approximate projected hemisphere out of total radius
- 	float mipmap = max(log2(size * is_rough)+ENV_MIPMAPS, 0);
+	
+	vec3 coord = 2*displaced_normal - view_angle;
+ 	float mipmap = max(log2(size * is_rough)+ENV_MIPMAPS_OFFSET, textureQueryLod(envtex, coord).y);
 
- 	vec4 light_color = textureLod(envtex, 2*displaced_normal - view_angle, mipmap);
+ 	vec4 light_color = textureLod(envtex, coord, mipmap);
 
   float roughsq = pow(is_rough, 2);
   float view_shadow = view_normal_angle/(view_normal_angle*(1-roughsq) + roughsq);
@@ -171,5 +174,8 @@ void main() {
   
   //tonemapping
   outColor = vec4(pow(outcolor_noalpha/(outcolor_noalpha+1), vec3(1/2.2)), color.a);
+
+	outNormal = vec4(normalize(vec3(transpose(inverse(cam))*vec4(displaced_normal, 1.0))), 1.0);
+	//outNormal = vec3(0.0);
 	//outColor = vec4(view_angle, 1.0);
 }

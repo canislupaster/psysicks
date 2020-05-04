@@ -1,1 +1,2 @@
 noremap <leader>o :make\|!./build/fps<CR>
+noremap <leader>l :!./build/fps<CR>
