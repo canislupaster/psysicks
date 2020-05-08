@@ -7,7 +7,7 @@
         "type": "cppdbg",
         "request": "launch",
         "program": "${workspaceRoot}/build/fps",
-        "externalConsole": true,
+        "externalConsole": false,
         "MIMode": "lldb",
 				"cwd": "${workspaceRoot}",
 				"stopAtEntry": true

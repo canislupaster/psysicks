@@ -1,7 +1,7 @@
 #version 400 core
 
 #define MAX_LIGHTS 10
-#define ENV_MIPMAPS_OFFSET 5
+#define ENV_MIPMAPS_OFFSET 7
 
 // math.glsl
 #define PI 3.1415926538
@@ -64,6 +64,7 @@ in vec3 fragtangent;
 
 layout(location=0) out vec4 outColor;
 layout(location=1) out vec4 outNormal;
+layout(location=2) out vec4 outRoughMetal;
 
 const float dielectric_baserefl = 0.04;
 
@@ -74,7 +75,7 @@ float do_fresnel(float is_metal, float view_offset) {
   return fresnel;
 }
 
-vec4 do_light(vec3 light_angle, vec4 light_color, vec3 view_angle, float view_normal_angle, vec4 color, float is_metal, float is_rough, vec3 displaced_normal) {
+vec4 do_light(vec3 light_angle, vec4 light_color, vec3 view_angle, float fresnel, float view_normal_angle, vec4 color, float is_metal, float is_rough, vec3 displaced_normal) {
   vec3 half_angle = normalize(light_angle + view_angle); //microsurface normal
   
   float normal_angle = abs(dot(half_angle, displaced_normal));
@@ -96,26 +97,26 @@ vec4 do_light(vec3 light_angle, vec4 light_color, vec3 view_angle, float view_no
   //equivalent to dividing roughness/spread by ellipse where x is scaled by roughness squared
   float ggx = roughsq/(1 - pow(normal_half_angle, 2)*(1-roughsq));
 
-	float spec = do_fresnel(is_metal, view_normal_angle)*ggx;
+	float spec = fresnel*ggx;
 
   return color*view_shadow*light_shadow*normal_angle*light_color.a
     * ((1.0-is_metal) + is_metal*light_color*spec);
 }
 
-vec4 do_env(samplerCube envtex, float dist, float radius, vec3 displaced_normal, vec3 view_angle, float view_normal_angle, vec4 color, float is_metal, float is_rough) {
+vec4 do_env(samplerCube envtex, float dist, float radius, vec3 displaced_normal, vec3 view_angle, float fresnel, float view_normal_angle, vec4 color, float is_metal, float is_rough) {
 	float edge_dist = radius-dist;
  	float size = edge_dist/(PI*radius); //approximate projected hemisphere out of total radius
 	
 	vec3 coord = 2*displaced_normal - view_angle;
+
  	float mipmap = max(log2(size * is_rough)+ENV_MIPMAPS_OFFSET, textureQueryLod(envtex, coord).y);
 
  	vec4 light_color = textureLod(envtex, coord, mipmap);
 
   float roughsq = pow(is_rough, 2);
   float view_shadow = view_normal_angle/(view_normal_angle*(1-roughsq) + roughsq);
-	float spec = do_fresnel(is_metal, view_normal_angle);
 
- 	return color*view_shadow*view_normal_angle*light_color*(1.0-is_metal + is_metal*spec);
+ 	return color*view_shadow*view_normal_angle*light_color*(1.0-is_metal + is_metal*fresnel);
 	//return vec4(view_shadow)*spec*light_color*color;
   //return vec4(view_angle, 1.0)*0.5;
 	//return vec4(spec);
@@ -136,6 +137,8 @@ void main() {
 
   float view_normal_angle = (1+dot(view_angle, displaced_normal))/2;
 	if (view_normal_angle<0) return;
+	
+	float fresnel = do_fresnel(is_metal, view_normal_angle);
 
   vec4 lit_color = vec4(0);
 
@@ -146,25 +149,26 @@ void main() {
 		vec3 light_angle = normalize(dist);
 		float falloff = pow(light.dist - min(length(dist), light.dist), 2) * 1/(light.dist*PI);
 
-		lit_color += do_light(light_angle, light.color, view_angle, view_normal_angle, textured_color, is_metal, is_rough, displaced_normal)*falloff;
+		lit_color += do_light(light_angle, light.color, view_angle, fresnel, view_normal_angle, textured_color, is_metal, is_rough, displaced_normal)*falloff;
 	}
 	
 	for (int i=0; i<dirlights_enabled; i++) {
     dirlight light = dirlights[i];
 
-    lit_color += do_light(normalize(light.dir), light.color, view_angle, view_normal_angle, textured_color, is_metal, is_rough, displaced_normal);
+    lit_color += do_light(normalize(light.dir), light.color, view_angle, fresnel, view_normal_angle, textured_color, is_metal, is_rough, displaced_normal);
   }
 
 	if (env_enabled[0]) {
 		//global env is always unit distance away
-		lit_color += do_env(global_env, 0.0, 1.0, displaced_normal, view_angle, view_normal_angle, textured_color, is_metal, is_rough);
+		lit_color += do_env(global_env, 0.0, 1.0, displaced_normal, view_angle, fresnel, view_normal_angle, textured_color, is_metal, is_rough);
 	}
 
 	if (env_enabled[1]) {
 		vec3 normalized_pos = fragpos - vec3(local_envpos);
 		float dist = length(normalized_pos); //0-local_envdist;
 		if (dist<local_envdist) {
-			lit_color += do_env(local_env, dist, local_envdist, displaced_normal, view_angle, view_normal_angle, textured_color, is_metal, is_rough);
+			lit_color += do_env(local_env, dist, local_envdist, displaced_normal, view_angle, fresnel, view_normal_angle, textured_color, is_metal, is_rough);
+			//return;
 		}
 	}
 
@@ -174,8 +178,11 @@ void main() {
   
   //tonemapping
   outColor = vec4(pow(outcolor_noalpha/(outcolor_noalpha+1), vec3(1/2.2)), color.a);
+	//outColor = vec4(max(-fragpos, 0), 1.0);
 
 	outNormal = vec4(normalize(vec3(transpose(inverse(cam))*vec4(displaced_normal, 1.0))), 1.0);
+
+	outRoughMetal = vec4(is_rough, is_metal, fresnel, 1.0);
 	//outNormal = vec3(0.0);
 	//outColor = vec4(view_angle, 1.0);
 }

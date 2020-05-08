@@ -13,6 +13,8 @@
 #include <cglm/cglm.h>
 #include "cgltf.h"
 #include "util.h"
+#define CUBEMAP_RES 512
+#define CUBEMAP_BOUNDS (vec2){(float)CUBEMAP_RES, (float)CUBEMAP_RES}
 typedef enum { spacescreen, space3d, spaceuninit } space_t;
 typedef enum {
   shader_fill,
@@ -138,6 +140,8 @@ typedef struct {
 		GLint size;
 		GLint depth;
 		GLint ao;
+		GLint ssr;
+		GLint rough_metal;
   } postproc3d;
 
   struct {
@@ -174,29 +178,26 @@ typedef struct {
 
   GLuint tex_fbo;
   object full_rect;
-  object full_cube;
 
   GLuint space3d_fbo;
   tex_t space3d_tex;
   tex_t space3d_depth;
 	tex_t space3d_normal;
+	tex_t space3d_rough_metal;
 } render_t;
 void update_bounds(render_t* render);
 void load_shaders(render_t* render);
 void add_rect(object* obj, vec3 width, vec3 height, vec2 tstart, vec2 tend);
-;
-
+void add_cube(object* obj, vec3 start, vec3 end);
 object object_new();
-;
 void object_init(object* obj);
-;
 tex_t tex_new();
-;
-
 render_t render_new(vec2 bounds);
 void render_free(render_t* render);
 void object_init(object* obj);
 tex_t tex_new();
+void tex_default_rgb(tex_t tex, vec2 bounds);
+void tex_single_channel(tex_t tex, vec2 bounds);
 typedef enum {
   texshader_boxfilter,
 	texshader_ao,
@@ -212,6 +213,8 @@ typedef union {
 		float size;
 		tex_t depth;
 		tex_t ao; //ao (non-blurred)
+		tex_t ssr; //ssr (non-blurred)
+		tex_t rough_metal;
 	} postproc3d;
 	struct {
 		float radius;
@@ -226,13 +229,32 @@ typedef union {
 		float view_far;
 	} ssr;
 } texshader_params;
+void process_texture(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out,
+                     GLenum tex_out_target, int level, texshader_type shadtype,
+                     texshader_params params);
+void process_texture_2d(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out, texshader_type shadtype, texshader_params params);
 void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
-                    texshader_params params);
+                   texshader_params params);
+void copy_proc_texture(render_t* render, tex_t out, vec2 bounds);
 tex_t load_hdri(render_t* render, char* hdri);
 void render_object(render_t* render, object* obj);
 void render_reset(render_t* render);
 object object_new();
+typedef struct {
+	vec3 pos;
+	tex_t cubemap;
+} probe_t;
+typedef struct {
+	float radius;
+	
+	map_t probes;
+	void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side); //renders into cubemap and side_tex
+} probes_t;
+probes_t probes_new(float radius, void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side));
+probe_t* probe_new(render_t* render, probes_t* probes, vec3 pos);
+void probe_select(render_t* render, probes_t* probes, vec3 pos);
 void add_rect(object* obj, vec3 start, vec3 end, vec2 tstart, vec2 tend);
+void add_cube(object* obj, vec3 start, vec3 end);
 typedef struct {
   map_t objects;
   map_t pointlights;

@@ -27,6 +27,13 @@
 #define BLUE \
   { 0.0, 0.0, 1.0, 1.0 }
 
+#define CUBEMAP_RES 512
+#define CUBEMAP_BOUNDS (vec2){(float)CUBEMAP_RES, (float)CUBEMAP_RES}
+
+#define VIEW_NEAR 0.1
+#define VIEW_FAR 100.0
+#define VIEW_FOV (M_PI / 3)
+
 typedef enum { spacescreen, space3d, spaceuninit } space_t;
 
 typedef enum {
@@ -190,6 +197,8 @@ typedef struct {
 		GLint size;
 		GLint depth;
 		GLint ao;
+		GLint ssr;
+		GLint rough_metal;
   } postproc3d;
 
   struct {
@@ -226,23 +235,37 @@ typedef struct {
 
   GLuint tex_fbo;
   object full_rect;
-  object full_cube;
 
   GLuint space3d_fbo;
   tex_t space3d_tex;
   tex_t space3d_depth;
 	tex_t space3d_normal;
+	tex_t space3d_rough_metal;
 } render_t;
 
-GLuint prog_new(const char* frag_src, const char* vert_src) {
-  GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
+GLuint vert_shad_new(const char* vert_src) {
   GLuint vert = glCreateShader(GL_VERTEX_SHADER);
-
-  glShaderSource(frag, 1, &frag_src, NULL);
-  glCompileShader(frag);
 
   glShaderSource(vert, 1, &vert_src, NULL);
   glCompileShader(vert);
+
+  int succ;
+  char err[1024];
+
+  glGetShaderiv(vert, GL_COMPILE_STATUS, &succ);
+  if (!succ) {
+    glGetShaderInfoLog(vert, 1024, NULL, err);
+    errx("shader vert: \n%s\n", err);
+  }
+
+	return vert;
+}
+
+GLuint prog_new(const char* frag_src, GLuint vert) {
+  GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
+
+  glShaderSource(frag, 1, &frag_src, NULL);
+  glCompileShader(frag);
 
   int succ;
   char err[1024];
@@ -253,12 +276,6 @@ GLuint prog_new(const char* frag_src, const char* vert_src) {
     errx("shader frag: \n%s\n", err);
   }
 
-  glGetShaderiv(vert, GL_COMPILE_STATUS, &succ);
-  if (!succ) {
-    glGetShaderInfoLog(vert, 1024, NULL, err);
-    errx("shader vert: \n%s\n", err);
-  }
-
   GLuint prog = glCreateProgram();
   glAttachShader(prog, vert);
   glAttachShader(prog, frag);
@@ -267,8 +284,8 @@ GLuint prog_new(const char* frag_src, const char* vert_src) {
   return prog;
 }
 
-obj_shader shader_new(const char* frag_src, const char* vert_src) {
-  obj_shader shad = {.prog = prog_new(frag_src, vert_src)};
+obj_shader shader_new(const char* frag_src, GLuint vert) {
+  obj_shader shad = {.prog = prog_new(frag_src, vert)};
   shad.obj = glGetUniformBlockIndex(shad.prog, "object");
   glUniformBlockBinding(shad.prog, shad.obj, 0);
 
@@ -277,8 +294,8 @@ obj_shader shader_new(const char* frag_src, const char* vert_src) {
   return shad;
 }
 
-tex_shader tex_shader_new(const char* frag_src, const char* vert_src) {
-  tex_shader shad = {.prog = prog_new(frag_src, vert_src)};
+tex_shader tex_shader_new(const char* frag_src, GLuint vert) {
+  tex_shader shad = {.prog = prog_new(frag_src, vert)};
   shad.tex = glGetUniformLocation(shad.prog, "tex");
   return shad;
 }
@@ -288,10 +305,7 @@ void update_bounds(render_t* render) {
   render->spacescreen[0][0] = 2 / render->bounds[0];
   render->spacescreen[1][1] = 2 / render->bounds[1];
 
-  glm_perspective(M_PI / 3, render->bounds[0] / render->bounds[1], 0.1, 100.0,
-                  render->space3d);
-
-  glViewport(0, 0, render->bounds[0], render->bounds[1]);
+  glm_perspective(VIEW_FOV, render->bounds[0] / render->bounds[1], VIEW_NEAR, VIEW_FAR, render->space3d);
 }
 
 void unit_texture(GLuint* tex, GLenum format) {
@@ -327,26 +341,31 @@ void unit_texture(GLuint* tex, GLenum format) {
          }
          */
 void load_shaders(render_t* render) {
-  render->fill.shader = shader_new(read_file("shaders/fill.frag"),
-                                   read_file("shaders/fill.vert"));
+	GLuint fillvert = vert_shad_new(read_file("shaders/fill.vert"));
+
+  render->fill.shader = shader_new(read_file("shaders/fill.frag"), fillvert);
   render->fill.color = glGetUniformLocation(render->fill.shader.prog, "color");
 
-  render->cubemap.shader = shader_new(read_file("shaders/cubemap.frag"),
-                                      read_file("shaders/cubemap.vert"));
+	GLuint cubevert = vert_shad_new(read_file("shaders/cubemap.vert"));
+
+  render->cubemap.shader = shader_new(read_file("shaders/cubemap.frag"), cubevert);
   render->cubemap.tex =
       glGetUniformLocation(render->cubemap.shader.prog, "tex");
 
-  render->tex3d.shader = shader_new(read_file("shaders/tex3d.frag"),
-                                    read_file("shaders/tex3d.vert"));
+	GLuint tex3dvert = vert_shad_new(read_file("shaders/tex3d.vert"));
+
+  render->tex3d.shader = shader_new(read_file("shaders/tex3d.frag"), tex3dvert);
   render->tex3d.tex = glGetUniformLocation(render->tex3d.shader.prog, "tex");
 
   render->txt.shader =
-      shader_new(read_file("shaders/txt.frag"), read_file("shaders/txt.vert"));
+      shader_new(read_file("shaders/txt.frag"), tex3dvert);
   render->txt.color = glGetUniformLocation(render->txt.shader.prog, "color");
   render->txt.tex = glGetUniformLocation(render->txt.shader.prog, "tex");
 
+	GLuint pbrvert = vert_shad_new(read_file("shaders/pbr.vert"));
+
   render->pbr.shader =
-      shader_new(read_file("shaders/pbr.frag"), read_file("shaders/pbr.vert"));
+      shader_new(read_file("shaders/pbr.frag"), pbrvert);
   render->pbr.color = glGetUniformLocation(render->pbr.shader.prog, "color");
   render->pbr.emissive =
       glGetUniformLocation(render->pbr.shader.prog, "emissive");
@@ -372,20 +391,20 @@ void load_shaders(render_t* render) {
       glGetUniformBlockIndex(render->pbr.shader.prog, "lighting");
   glUniformBlockBinding(render->pbr.shader.prog, pbr_lighting, 1);
 
-  render->boxfilter.shader = tex_shader_new(
-      read_file("shaders/boxfilter.frag"), read_file("shaders/boxfilter.vert"));
+	GLuint texvert = vert_shad_new(read_file("shaders/tex.vert"));
+
+  render->boxfilter.shader = tex_shader_new(read_file("shaders/boxfilter.frag"), texvert);
   render->boxfilter.size =
       glGetUniformLocation(render->boxfilter.shader.prog, "size");
 
   render->ao.shader =
-      tex_shader_new(read_file("shaders/ao.frag"),
-                     read_file("shaders/ao.vert"));
+      tex_shader_new(read_file("shaders/ao.frag"), texvert);
 	render->ao.radius = glGetUniformLocation(render->ao.shader.prog, "radius");
 	render->ao.samples = glGetUniformLocation(render->ao.shader.prog, "samples");
 	render->ao.normal = glGetUniformLocation(render->ao.shader.prog, "normal");
 	render->ao.seed = glGetUniformLocation(render->ao.shader.prog, "seed");
 
-  render->ssr.shader = tex_shader_new(read_file("shaders/ssr.frag"), read_file("shaders/ssr.vert"));
+  render->ssr.shader = tex_shader_new(read_file("shaders/ssr.frag"), texvert);
 	render->ssr.normal = glGetUniformLocation(render->ssr.shader.prog, "normal");
 	render->ssr.depth = glGetUniformLocation(render->ssr.shader.prog, "depth");
 	render->ssr.size = glGetUniformLocation(render->ssr.shader.prog, "size");
@@ -393,14 +412,14 @@ void load_shaders(render_t* render) {
 
 
   render->postproc3d.shader =
-      tex_shader_new(read_file("shaders/postprocess3d.frag"),
-                     read_file("shaders/postprocess3d.vert"));
+      tex_shader_new(read_file("shaders/postprocess3d.frag"), texvert);
 	render->postproc3d.size = glGetUniformLocation(render->postproc3d.shader.prog, "size");
 	render->postproc3d.depth = glGetUniformLocation(render->postproc3d.shader.prog, "depth");
 	render->postproc3d.ao = glGetUniformLocation(render->postproc3d.shader.prog, "ao");
+	render->postproc3d.ssr = glGetUniformLocation(render->postproc3d.shader.prog, "ssr");
+	render->postproc3d.rough_metal = glGetUniformLocation(render->postproc3d.shader.prog, "rough_metal");
 
-  render->tex.shader = tex_shader_new(read_file("shaders/tex.frag"),
-                                      read_file("shaders/tex.vert"));
+  render->tex.shader = tex_shader_new(read_file("shaders/tex.frag"), texvert);
 }
 
 void add_rect(object* obj, vec3 width, vec3 height, vec2 tstart, vec2 tend);
@@ -429,21 +448,28 @@ render_t render_new(vec2 bounds) {
   // enable
   glEnable(GL_MULTISAMPLE);
   glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
-
   glEnable(GL_DEPTH_TEST);
-	//glDepthFunc(GL_ALWAYS);
 
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   // set texture fbo for processing textures
   glGenFramebuffers(1, &render.tex_fbo);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, render.tex_fbo);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	
   // set 3d fbo for 3d postprocessing
   glGenFramebuffers(1, &render.space3d_fbo);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, render.space3d_fbo);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glCullFace(GL_BACK);
 
   render.space3d_tex = tex_new();
   render.space3d_depth = tex_new();
   render.space3d_normal = tex_new();
+	render.space3d_rough_metal = tex_new();
 
   // set default texture
   unit_texture(&render.default_tex, GL_RGBA);
@@ -451,11 +477,7 @@ render_t render_new(vec2 bounds) {
 
   load_shaders(&render);
 
-  // set cube and rect
-  render.full_cube = object_new();
-  add_cube(&render.full_cube, (vec3){-1, -1, -1}, (vec3){1, 1, 1});
-  object_init(&render.full_cube);
-
+  // set rect
   render.full_rect = object_new();
   add_rect(&render.full_rect, (vec3){-1, -1, 0}, (vec3){2, 2, 0}, (vec2){0, 0},
            (vec2){1, 1});
@@ -590,7 +612,7 @@ tex_t tex_new() {
   GLERR;
 
   return tex;
-};
+}
 
 void tex_default(tex_t tex, vec2 bounds) {
   glBindTexture(GL_TEXTURE_2D, tex);
@@ -628,6 +650,8 @@ typedef union {
 		float size;
 		tex_t depth;
 		tex_t ao; //ao (non-blurred)
+		tex_t ssr; //ssr (non-blurred)
+		tex_t rough_metal;
 	} postproc3d;
 	struct {
 		float radius;
@@ -643,8 +667,8 @@ typedef union {
 	} ssr;
 } texshader_params;
 
-void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
-                    texshader_params params) {
+void shade_texture(render_t* render, tex_t tex, texshader_type shadtype,
+                   texshader_params params) {
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, tex);
   GLERR;
@@ -705,6 +729,14 @@ void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
 			glActiveTexture(GL_TEXTURE2);
 			glBindTexture(GL_TEXTURE_2D, params.postproc3d.ao);
 			glUniform1i(render->postproc3d.ao, 2);
+
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, params.postproc3d.ssr);
+			glUniform1i(render->postproc3d.ssr, 3);
+
+			glActiveTexture(GL_TEXTURE4);
+			glBindTexture(GL_TEXTURE_2D, params.postproc3d.rough_metal);
+			glUniform1i(render->postproc3d.rough_metal, 4);
 			break;
 		};
     default:;
@@ -718,57 +750,103 @@ void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
   GLERR;
 }
 
-void process_texture(render_t* render, tex_t tex, tex_t tex_out,
+void process_texture(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out,
                      GLenum tex_out_target, int level, texshader_type shadtype,
                      texshader_params params) {
+
   glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
+	glViewport(0, 0, (int)bounds[0], (int)bounds[1]);
+
   GLERR;
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex_out_target,
                          tex_out, level);
 
-  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClearColor(0.0, 0.0, 0.0, 0.0);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   GLERR;
 
   GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
   if (status != GL_FRAMEBUFFER_COMPLETE) errx("%u", status);
 
-  render_texture(render, tex, shadtype, params);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  shade_texture(render, tex, shadtype, params);
 }
 
-void process_texture_2d(render_t* render, tex_t tex, tex_t tex_out, texshader_type shadtype, texshader_params params) {
-	process_texture(render, tex, tex_out, GL_TEXTURE_2D, 0, shadtype, params);
+void process_texture_2d(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out, texshader_type shadtype, texshader_params params) {
+	process_texture(render, bounds, tex, tex_out, GL_TEXTURE_2D, 0, shadtype, params);
 }
 
-#define CUBEMAP_RES 512
+void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
+                   texshader_params params) {
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, (int)render->bounds[0], (int)render->bounds[1]);
 
-void convolve_side(render_t* render, GLenum side, tex_t cubemap, float* data) {
+	shade_texture(render, tex, shadtype, params);
+}
+
+void copy_proc_texture(render_t* render, tex_t out, vec2 bounds) {
+  glBindTexture(GL_TEXTURE_2D, out);
+  glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
+
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 0, 0, (int)bounds[0], (int)bounds[1], 0);
+}
+
+void convolve_side(render_t* render, GLenum side, tex_t cubemap, tex_t tex) {
   int level = 1;
 
-  tex_t tex = tex_new();  // boxfilter texture
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB,
-               GL_FLOAT, data);
-
   for (int new_c = CUBEMAP_RES / 2; new_c >= 1; new_c /= 2) {
+		//until there is a vec2i, im going to pretend like there is no casting
+		vec2 bounds = {(float)new_c, (float)new_c};
+
+		glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
     glTexImage2D(side, level, GL_RGB16F, new_c, new_c, 0, GL_RGB, GL_FLOAT,
                  NULL);
     process_texture(
-        render, tex, cubemap, side, level, texshader_boxfilter,
+        render, bounds, tex, cubemap, side, level, texshader_boxfilter,
         (texshader_params){.boxfilter = {.size = 0.5 / (float)new_c}});
 
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
-
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 0, 0, new_c, new_c, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		copy_proc_texture(render, tex, bounds);
 
     level++;
   }
+}
 
-  tex_free(tex);
+void convolve_side_data(render_t* render, GLenum side, tex_t tex, void* data) {
+	tex_t tex_data = tex_new();
+	glBindTexture(GL_TEXTURE_2D, tex_data); //bind explicitly
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, data);
+
+  convolve_side(render, side, tex, tex_data);
+  tex_free(tex_data);
+  GLERR;
+}
+
+tex_t cubemap_new(render_t* render, void* up, void* down, void* left, void* right, void* front, void* back) {
+  tex_t tex;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, up);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, down);
+
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, left);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, right);
+
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, front);
+  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGB16F, CUBEMAP_RES,
+               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, back);
+
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  GLERR;
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  GLERR;
+	return tex;
 }
 
 tex_t load_hdri(render_t* render, char* hdri) {
@@ -860,38 +938,14 @@ tex_t load_hdri(render_t* render, char* hdri) {
 
   drop(data);
 
-  tex_t tex;
-  glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, up);
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, down);
+	tex_t tex = cubemap_new(render, up, down, left, right, front, back);
 
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, left);
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, right);
-
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, front);
-  glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGB16F, CUBEMAP_RES,
-               CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, back);
-
-  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  GLERR;
-  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  GLERR;
-
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Y, tex, up);
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, tex, down);
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_X, tex, left);
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_POSITIVE_X, tex, right);
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, tex, front);
-  convolve_side(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Z, tex, back);
-  GLERR;
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Y, tex, up);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, tex, down);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_X, tex, left);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_X, tex, right);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, tex, front);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Z, tex, back);
 
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER,
                   GL_LINEAR_MIPMAP_LINEAR);
@@ -924,7 +978,11 @@ void render_object(render_t* render, object* obj) {
 
   if (obj->space == space3d) {
     glBindFramebuffer(GL_FRAMEBUFFER, render->space3d_fbo);
-  }
+  } else {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+
+  glViewport(0, 0, (int)render->bounds[0], (int)render->bounds[1]);
 
   GLERR;
 
@@ -1019,12 +1077,10 @@ void render_object(render_t* render, object* obj) {
   glBindVertexArray(obj->vao);
   GLERR;
 
+	//glEnable(GL_CULL_FACE);
   glDrawElements(GL_TRIANGLES, obj->elements.length, GL_UNSIGNED_INT, 0);
+	//glDisable(GL_CULL_FACE);
   GLERR;
-
-  if (obj->space == space3d) {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  }
 }
 
 // call before frame to reset spaces and fix lights
@@ -1046,6 +1102,11 @@ void render_reset(render_t* render) {
 
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, render->space3d_normal, 0);
 
+	tex_default_rgb(render->space3d_rough_metal, render->bounds);
+
+	glBindTexture(GL_TEXTURE_2D, render->space3d_rough_metal);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, render->space3d_rough_metal, 0);
+
   glBindTexture(GL_TEXTURE_2D, render->space3d_depth);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, render->bounds[0],
                render->bounds[1], 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
@@ -1057,7 +1118,7 @@ void render_reset(render_t* render) {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   GLERR;
 
-	glDrawBuffers(2, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1});
+	glDrawBuffers(3, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2});
 	
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -1134,6 +1195,140 @@ void object_free(object* obj) {
   }
 }
 
+typedef struct {
+	vec3 pos;
+	tex_t cubemap;
+} probe_t;
+
+typedef struct {
+	float radius;
+	
+	map_t probes;
+	void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side); //renders into cubemap and side_tex
+} probes_t;
+
+probes_t probes_new(float radius, void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side)) {
+	probes_t probes = {.radius=radius, .render_probe=render_probe};
+	probes.probes = map_new();
+
+	map_configure_ulong_key(&probes.probes, sizeof(probe_t));
+
+	return probes;
+}
+
+void probe_render_side(render_t* render, probes_t* probes, tex_t side_tex, tex_t tex, GLenum side) {
+	glBindTexture(GL_TEXTURE_2D, side_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, NULL);
+
+	probes->render_probe(render, side_tex, tex, side);
+	convolve_side(render, side, tex, side_tex);
+}
+
+uint64_t probe_pos_hash(float radius, vec3 pos) {
+	vec3 pos_radii;
+	glm_vec3_divs(pos, radius, pos_radii);
+	glm_vec3_adds(pos_radii, radius, pos_radii); //align so casting to int will return rounded distance
+
+	return vec3_hash(pos_radii);
+}
+
+probe_t* probe_new(render_t* render, probes_t* probes, vec3 pos) {
+	tex_t tex = cubemap_new(render, NULL, NULL, NULL, NULL, NULL, NULL);
+	tex_t side_tex = tex_new();
+	
+	glm_perspective(M_PI/2, 1.0, VIEW_NEAR, VIEW_FAR, render->space3d);
+	
+	//i can do this myself i dont need any... sinusoidal rotations or fancy stuff
+	//im sorry it used to be cleaner but we need to translate accounting for the skew
+
+	mat4 translate;
+	glm_translate_make(translate, pos); //this is stupid but i am lazy
+	
+	glm_mat4_identity(render->cam);
+	render->cam[1][1] = 1;
+
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_Z);
+
+	glm_mat4_identity(render->cam);
+	render->cam[1][1] = 1;
+	render->cam[2][2] = -1;
+
+	render->cam[0][0] = -1;
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z);
+
+	glm_mat4_identity(render->cam);
+
+	render->cam[2][2] = 0;
+	render->cam[1][1] = 0;
+	render->cam[2][1] = 1;
+	render->cam[1][2] = 1;
+
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_Y);
+
+	glm_mat4_identity(render->cam);
+
+	render->cam[2][2] = 0;
+	render->cam[1][1] = 0;
+	render->cam[2][1] = -1;
+	render->cam[1][2] = -1;
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y);
+
+	glm_mat4_identity(render->cam);
+	render->cam[1][1] = 1;
+
+	render->cam[0][0] = 0;
+	render->cam[2][2] = 0;
+	render->cam[2][0] = -1;
+	render->cam[0][2] = 1;
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_X);
+
+	glm_mat4_identity(render->cam);
+	render->cam[1][1] = 1;
+
+	render->cam[0][0] = 0;
+	render->cam[2][2] = 0;
+
+	render->cam[2][0] = 1;
+	render->cam[0][2] = -1;
+	glm_mat4_mul(render->cam, translate, render->cam);
+	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+
+	tex_free(side_tex);
+	
+	uint64_t key = probe_pos_hash(probes->radius, pos);
+
+	probe_t* probe = map_insert(&probes->probes, &key).val;
+	glm_vec3_copy(pos, probe->pos);
+	probe->cubemap = tex;
+
+	update_bounds(render);
+
+	return probe;
+}
+
+void probe_select(render_t* render, probes_t* probes, vec3 pos) {
+	vec3 pos_radii;
+	glm_vec3_divs(pos, probes->radius, pos_radii);
+	
+	uint64_t key = probe_pos_hash(probes->radius, pos);
+	probe_t* probe = map_find(&probes->probes, &key);
+
+	if (!probe) {
+		render->ibl.local_env_enabled = 0;
+		return;
+	}
+	
+	render->ibl.local_env_enabled = 1;
+	glm_vec3_copy(probe->pos, render->ibl.local_envpos);
+
+	render->local_env = probe->cubemap;
+}
+
 void add_rect(object* obj, vec3 start, vec3 end, vec2 tstart, vec2 tend) {
   vertex* verts;
 
@@ -1165,7 +1360,7 @@ void add_rect(object* obj, vec3 start, vec3 end, vec2 tstart, vec2 tend) {
   }
 
   unsigned long i = obj->vertices.length;
-  GLuint elems[] = {i, i + 1, i + 2, i + 1, i + 2, i + 3};
+  GLuint elems[] = {i, i + 2, i + 1, i + 1, i + 2, i + 3};
 
   vector_stockcpy(&obj->vertices, 4, verts);
   vector_stockcpy(&obj->elements, 6, elems);
@@ -1180,7 +1375,7 @@ void extrude(object* obj, vec3 offset) {
   glm_vec3_add(edge[1]->pos, offset, verts[1].pos);
 
   unsigned long i = obj->vertices.length;
-  GLuint elems[] = {i - 2, i - 1, i + 1, i - 2, i, i + 1};
+  GLuint elems[] = {i + 1, i - 1, i - 2, i - 2, i, i + 1};
 
   vector_stockcpy(&obj->vertices, 2, verts);
   vector_stockcpy(&obj->elements, 6, elems);
@@ -1512,8 +1707,11 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
       glm_vec3_copy(node->light->color, dirl->color);
       dirl->color[3] = node->light->intensity;
 
-      glm_mat4_mulv(transform, (vec4){0, 0, -1, 0}, dirl->dir);
-      glm_normalize(dirl->dir);
+			vec4 dir;
+      glm_mat4_mulv(transform, (vec4){0, 0, -1, 0}, dir);
+      glm_normalize(dir);
+
+			glm_vec3_copy(dir, dirl->dir);
     } else if (node->light->type == cgltf_light_type_point) {
       pointlight* pointl = map_insert(&sc->pointlights, &name).val;
       glm_vec3_copy(node->light->color, pointl->color);

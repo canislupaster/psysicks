@@ -31,6 +31,34 @@ map_t default_configuration() {
   return cfg;
 }
 
+tex_t ao;
+tex_t ssr;
+unsigned long frame = 0;
+gltf_scene sc;
+
+void render_probe(render_t* render, tex_t tex, tex_t cubemap, GLenum side) {
+	render_reset(render);
+
+	map_iterator iter = map_iterate(&sc.objects);
+	while (map_next(&iter)) {
+		object* obj = iter.x;
+		render_object(render, obj);
+	}
+
+	tex_single_channel(ao, render->bounds);
+	process_texture_2d(render, render->bounds, render->space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render->bounds[0], .samples = 12, .normal=render->space3d_normal, .seed=(float)frame/500.0}});
+
+	vec2 ssr_bounds;
+	glm_vec2_scale(render->bounds, 2, ssr_bounds);
+	tex_default_rgb(ssr, ssr_bounds);
+
+	process_texture_2d(render, ssr_bounds, render->space3d_rough_metal, ssr, texshader_ssr, (texshader_params){.ssr={.normal=render->space3d_normal, .depth=render->space3d_depth, .size = 1.0/render->bounds[0], .view_far=100.0}});
+
+
+	process_texture(render, CUBEMAP_BOUNDS, render->space3d_tex, cubemap, side, 0, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render->bounds[0], .depth=render->space3d_depth, .ao=ao, .ssr=ssr, .rough_metal=render->space3d_rough_metal}});
+	copy_proc_texture(render, tex, CUBEMAP_BOUNDS);
+}
+
 int main(int argc, char** argv) {
   map_t cfg = default_configuration();
   configure(&cfg, "fpscfg.txt");
@@ -94,16 +122,15 @@ int main(int argc, char** argv) {
   // sdlerr();
   // GLERR;
 
-  gltf_scene sc = load_gltf(&render, "untitled.glb");
+  sc = load_gltf(&render, "untitled.glb");
   // gltf_scene cube_sc = load_gltf(&render, "cube.glb");
 
-  // object cube = object_new();
-  // add_cube(&cube, (vec3){-1, -1, -1}, (vec3){2, 2, 2});
+  object cube = object_new();
+  add_cube(&cube, (vec3){-1, -1, -1}, (vec3){2, 2, 2});
 
-  // cube.shader = shader_cubemap;
-  // cube.texture = tex;
-  //
-  // object_init(&cube);
+  cube.shader = shader_cubemap;
+  
+  object_init(&cube);
 
   // r2.shader = shader_tex;
   // r2.texture = scobj->pbr.tex.diffuse;
@@ -117,7 +144,7 @@ int main(int argc, char** argv) {
 	glm_vec3_negate(player_pos);
 	printf("%f, %f, %f\n", player_pos[0], player_pos[1], player_pos[2]);
 
-  vec2 player_rot = {-2, 0.5};
+  vec2 player_rot = {0,0};
 
   iter = map_iterate(&sc.objects);
   while (map_next(&iter)) {
@@ -128,18 +155,23 @@ int main(int argc, char** argv) {
   // vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, 1, 0},
   // .color=WHITE});
 
-  render.ibl.global_env_enabled = 1;
-  // glm_vec3_zero(render.ibl.local_envpos);
-  // render.ibl.local_envdist = 20;
   render.global_env = tex;
+	render.ibl.global_env_enabled = 1;
 
   // vector_add(&sc.dirlights, &render.dirlights);
 
   // render_setambient(&render, (vec4){0.5,0.5,0.5,0.5});
 
-	tex_t ao = tex_new();
+	ao = tex_new();
+	ssr = tex_new();
 
-  unsigned long frame = 0;
+	probes_t probes = probes_new(50.0, &render_probe);
+	probe_t* probe = probe_new(&render, &probes, (vec3){2,1,0});
+
+	render.ibl.global_env_enabled = 1;
+	render.ibl.local_env_enabled = 0;
+	render.ibl.local_envdist = 10.0;
+
   unsigned int tick = 0;
 
   int mouse_captured = 0;
@@ -153,6 +185,11 @@ int main(int argc, char** argv) {
     frame++;
     render_reset(&render);
 
+		//cube.texture = probe->cubemap;
+		//render_object(&render, &cube);
+
+		//render_texture(&render, render.space3d_tex, texshader_tex, (texshader_params){});
+
     iter = map_iterate(&sc.objects);
     while (map_next(&iter)) {
       object* obj = iter.x;
@@ -161,33 +198,27 @@ int main(int argc, char** argv) {
       // glm_rotate_x(in_transform, 0.2, out_transform);
       //glm_rotate(transform, M_PI / 300, (vec3){0.1, 0.1, 0.0});
       glm_mat4_ucopy(transform, obj->transform);
+
+			probe_select(&render, &probes, obj->transform[3]);
       render_object(&render, obj);
     }
 
-    //disp_rect.transform[0][0] = render.bounds[0] / 2;
-    //disp_rect.transform[1][1] = render.bounds[1] / 2;
-    //disp_rect.texture = render.space3d_tex;
-    //render_object(&render, &disp_rect);
+    disp_rect.transform[0][0] = render.bounds[0] / 2;
+    disp_rect.transform[1][1] = render.bounds[1] / 2;
+    disp_rect.texture = render.space3d_tex;
+    render_object(&render, &disp_rect);
 		
-		//tex_single_channel(ao, render.bounds);
-		//process_texture_2d(&render, render.space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render.bounds[0], .samples = 12, .normal=render.space3d_normal, .seed=(float)frame/500.0}});
+		tex_single_channel(ao, render.bounds);
+		process_texture_2d(&render, render.bounds, render.space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render.bounds[0], .samples = 12, .normal=render.space3d_normal, .seed=(float)frame/500.0}});
 
-		render_texture(&render, render.space3d_tex, texshader_ssr, (texshader_params){.ssr={.normal=render.space3d_normal, .depth=render.space3d_depth, .size = 1.0/render.bounds[0], .view_far=100.0}});
-		//process_texture_2d(&render, render.space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 5.0/render.bounds[0], .samples = 5, .normal=render.space3d_normal}});
+		vec2 ssr_bounds;
+		glm_vec2_scale(render.bounds, 2, ssr_bounds);
+		tex_default_rgb(ssr, ssr_bounds);
 
-		//render_texture(&render, render.space3d_tex, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render.bounds[0], .depth=render.space3d_depth, .ao=ao}});
-		//render_texture(&render, render.space3d_depth, texshader_ao, (texshader_params){.ao={.radius = 30.0/render.bounds[0], .samples = 16, .normal=render.space3d_normal}});
+		process_texture_2d(&render, ssr_bounds, render.space3d_rough_metal, ssr, texshader_ssr, (texshader_params){.ssr={.normal=render.space3d_normal, .depth=render.space3d_depth, .size = 1.0/render.bounds[0], .view_far=100.0}});
 
-    // glm_rotate(scobj->transform, M_PI/300, (vec3){0.1, 0.0, 0.0});
-    // glm_rotate(scobj->transform, -M_PI/400, (vec3){0.0, 1.0, 0.0});
 
-    // render_object(&render, &r2);
-    // vector_iterator obj_iter = vector_iterate(&sc.objects);
-    // while (vector_next(&obj_iter)) {
-    //   render_object(&render, obj_iter.x);
-    // }
-
-    // render_object(&render, scobj);
+		render_texture(&render, render.space3d_tex, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render.bounds[0], .depth=render.space3d_depth, .ao=ao, .ssr=ssr, .rough_metal=render.space3d_rough_metal}});
 
     SDL_GL_SwapWindow(window);
     sdlerr();

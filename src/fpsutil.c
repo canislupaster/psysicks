@@ -1,6 +1,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <stdint.h>
+#include <limits.h>
+
 #include <SDL2/SDL.h>
 
 #include "gl.h"
@@ -13,6 +16,11 @@
 
 int vec3_iszero(vec3 vec) {
   return vec[0] == 0 && vec[1] == 0 && vec[2] == 0;
+}
+
+uint64_t vec3_hash(vec3 vec) {
+	//fit three floats into 64 bits by normalizing to int (discarding negative exponents)
+	return (uint64_t)vec[0] + (uint64_t)vec[1]*FLT_MAX + (uint64_t)vec[2]*FLT_MAX;
 }
 
 void errx(char* s, ...) {
