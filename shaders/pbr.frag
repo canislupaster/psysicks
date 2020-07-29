@@ -148,7 +148,6 @@ void main() {
 		vec3 dist = light.pos - fragpos;
 		vec3 light_angle = normalize(dist);
 		float falloff = pow(light.dist - min(length(dist), light.dist), 2) * 1/(light.dist*PI);
-
 		lit_color += do_light(light_angle, light.color, view_angle, fresnel, view_normal_angle, textured_color, is_metal, is_rough, displaced_normal)*falloff;
 	}
 	
@@ -180,7 +179,11 @@ void main() {
   outColor = vec4(pow(outcolor_noalpha/(outcolor_noalpha+1), vec3(1/2.2)), color.a);
 	//outColor = vec4(max(-fragpos, 0), 1.0);
 
-	outNormal = vec4(normalize(vec3(transpose(inverse(cam))*vec4(displaced_normal, 1.0))), 1.0);
+	outNormal = vec4(vec3(transpose(inverse(cam))*vec4(displaced_normal, 1.0)), 1.0);
+
+	//center for negative values
+	outNormal += 1.0;
+	outNormal /= 2.0;
 
 	outRoughMetal = vec4(is_rough, is_metal, fresnel, 1.0);
 	//outNormal = vec3(0.0);

@@ -36,8 +36,18 @@ tex_t ssr;
 unsigned long frame = 0;
 gltf_scene sc;
 
-void render_probe(render_t* render, tex_t tex, tex_t cubemap, GLenum side) {
+vec2 ssr_bounds;
+
+void update_bounds_main(render_t* render) {
+	tex_default(&ao, GL_RED, render->bounds);
+
+	glm_vec2_scale(render->bounds, 1, ssr_bounds);
+	tex_default(&ssr, GL_RGB, ssr_bounds);
+}
+
+void render_probe(render_t* render, targets_t* targets, tex_t* tex, tex_t* cubemap, GLenum side) {
 	render_reset(render);
+	render_reset3d_multisample(render, targets);
 
 	map_iterator iter = map_iterate(&sc.objects);
 	while (map_next(&iter)) {
@@ -45,17 +55,14 @@ void render_probe(render_t* render, tex_t tex, tex_t cubemap, GLenum side) {
 		render_object(render, obj);
 	}
 
-	tex_single_channel(ao, render->bounds);
-	process_texture_2d(render, render->bounds, render->space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render->bounds[0], .samples = 12, .normal=render->space3d_normal, .seed=(float)frame/500.0}});
+	render_finish3d_multisample(render);
 
-	vec2 ssr_bounds;
-	glm_vec2_scale(render->bounds, 2, ssr_bounds);
-	tex_default_rgb(ssr, ssr_bounds);
+	process_texture_2d(render, render->bounds, &render->targets->space3d_depth, &ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render->bounds[0], .samples = 12, .normal=&render->targets->space3d_normal, .seed=(float)frame/500.0}});
 
-	process_texture_2d(render, ssr_bounds, render->space3d_rough_metal, ssr, texshader_ssr, (texshader_params){.ssr={.normal=render->space3d_normal, .depth=render->space3d_depth, .size = 1.0/render->bounds[0], .view_far=100.0}});
+	process_texture_2d(render, ssr_bounds, &render->targets->space3d_rough_metal, &ssr, texshader_ssr, (texshader_params){.ssr={.normal=&render->targets->space3d_normal, .depth=&render->targets->space3d_depth, .size = 1.0/render->bounds[0]}});
 
 
-	process_texture(render, CUBEMAP_BOUNDS, render->space3d_tex, cubemap, side, 0, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render->bounds[0], .depth=render->space3d_depth, .ao=ao, .ssr=ssr, .rough_metal=render->space3d_rough_metal}});
+	process_texture(render, CUBEMAP_BOUNDS, &render->targets->space3d_tex, cubemap, side, 0, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render->bounds[0], .depth=&render->targets->space3d_depth, .ao=&ao, .ssr=&ssr, .rough_metal=&render->targets->space3d_rough_metal}});
 	copy_proc_texture(render, tex, CUBEMAP_BOUNDS);
 }
 
@@ -98,15 +105,13 @@ int main(int argc, char** argv) {
   SDL_GetWindowSize(window, &w, &h);
 
   vec2 bounds = {(float)w, (float)h};
-  render_t render = render_new(bounds);
+  render_t render = render_new(bounds, 4);
+	update_bounds_main(&render);
+
+	targets_t default_targets = targets_new(&render, 1);
+	render.targets = &default_targets;
 
   tex_t tex = load_hdri(&render, "./Frozen_Waterfall_Ref.hdr");
-
-  object disp_rect = object_new();
-  add_rect(&disp_rect, (vec3){-1, -1, 0}, (vec3){2, 2, 0}, (vec2){0, 0}, (vec2){1, 1});
-  disp_rect.shader = shader_tex;
-  disp_rect.space = spacescreen;
-  object_init(&disp_rect);
 
   // object r2 = rect(1200, 1200, (vec4)BLUE);
   // object_setpos(&r2, (vec3){-600, -600, 0});
@@ -149,11 +154,11 @@ int main(int argc, char** argv) {
   iter = map_iterate(&sc.objects);
   while (map_next(&iter)) {
     object* obj = iter.x;
+		obj->params.pbr.rough = 0.3;
   }
 
   // glm_mat4_ucopy(iter.x, render.cam);
-  // vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, 1, 0},
-  // .color=WHITE});
+  vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, -1, 0}, .color={1,1,1,0.2}});
 
   render.global_env = tex;
 	render.ibl.global_env_enabled = 1;
@@ -163,14 +168,19 @@ int main(int argc, char** argv) {
   // render_setambient(&render, (vec4){0.5,0.5,0.5,0.5});
 
 	ao = tex_new();
-	ssr = tex_new();
+	ssr = tex_new(); //ssr is already upscaled
 
-	probes_t probes = probes_new(50.0, &render_probe);
-	probe_t* probe = probe_new(&render, &probes, (vec3){2,1,0});
+	//probes_t probes = probes_new(50.0, &render_probe);
+	//probe_t* probe = probe_new(&render, &default_targets, &probes, (vec3){2,1,0});
 
 	render.ibl.global_env_enabled = 1;
 	render.ibl.local_env_enabled = 0;
 	render.ibl.local_envdist = 10.0;
+	update_bounds_main(&render);
+
+	vec3 global_dir = {2,10,1};
+
+	targets_t shadow_targets = targets_new(&render, 1);
 
   unsigned int tick = 0;
 
@@ -178,47 +188,66 @@ int main(int argc, char** argv) {
 
   while (1) {
     glm_mat4_identity(render.cam);
+		
     glm_rotate_x(render.cam, player_rot[1], render.cam);
     glm_rotate_y(render.cam, player_rot[0], render.cam);
+
     glm_translate(render.cam, player_pos);
 
     frame++;
-    render_reset(&render);
+		render_reset(&render);
 
 		//cube.texture = probe->cubemap;
 		//render_object(&render, &cube);
 
 		//render_texture(&render, render.space3d_tex, texshader_tex, (texshader_params){});
 
+		//render shadows
+    render_reset3d_multisample(&render, &shadow_targets);
+
     iter = map_iterate(&sc.objects);
     while (map_next(&iter)) {
-      object* obj = iter.x;
-      mat4 transform;  // aligned
-      glm_mat4_ucopy(obj->transform, transform);
-      // glm_rotate_x(in_transform, 0.2, out_transform);
-      //glm_rotate(transform, M_PI / 300, (vec3){0.1, 0.1, 0.0});
-      glm_mat4_ucopy(transform, obj->transform);
+    	object* obj = iter.x;
 
-			probe_select(&render, &probes, obj->transform[3]);
-      render_object(&render, obj);
+			vector_iterator viter = vector_iterate(&render.dirlights);
+			while (vector_next(&viter)) {
+				dirlight* dirl = viter.x;
+				render_object_shader_space(&render, obj, shader_shadow, &(objshader_params){.shadow={.light_dirpos=dirl->dir, .softness=0.0, .opacity=dirl->color[3], .height=&heightmap, .heightmap_size=map_scale/map_size}}, space3d);
+			}
+
+			viter = vector_iterate(&render.pointlights);
+			while (vector_next(&viter)) {
+				pointlight* pointl = viter.x;
+				render_object_shader_space(&render, obj, shader_shadow, &(objshader_params){.shadow={.light_dirpos=pointl->pos, .softness=1.0/pointl->dist, .opacity=pointl->color[3], .height=&heightmap, .heightmap_size=map_scale/map_size}}, space3d);
+			}
     }
 
-    disp_rect.transform[0][0] = render.bounds[0] / 2;
-    disp_rect.transform[1][1] = render.bounds[1] / 2;
-    disp_rect.texture = render.space3d_tex;
-    render_object(&render, &disp_rect);
+		render_finish3d_multisample(&render);
+
+		//render objects
+    render_reset3d_multisample(&render, &default_targets);
 		
-		tex_single_channel(ao, render.bounds);
-		process_texture_2d(&render, render.bounds, render.space3d_depth, ao, texshader_ao, (texshader_params){.ao={.radius = 40.0/render.bounds[0], .samples = 12, .normal=render.space3d_normal, .seed=(float)frame/500.0}});
+    iter = map_iterate(&sc.objects);
+    while (map_next(&iter)) {
+    	object* obj = iter.x;
+    	//mat4 transform;  // aligned
+    	//glm_mat4_ucopy(obj->transform, transform);
+    	//glm_rotate_x(in_transform, 0.2, out_transform);
+    	//glm_rotate(transform, M_PI / 300, (vec3){0.1, 0.1, 0.0});
+    	//glm_mat4_ucopy(transform, obj->transform);
 
-		vec2 ssr_bounds;
-		glm_vec2_scale(render.bounds, 2, ssr_bounds);
-		tex_default_rgb(ssr, ssr_bounds);
+			//probe_select(&render, &probes, obj->transform[3]);
+    	render_object(&render, obj);
+    }
 
-		process_texture_2d(&render, ssr_bounds, render.space3d_rough_metal, ssr, texshader_ssr, (texshader_params){.ssr={.normal=render.space3d_normal, .depth=render.space3d_depth, .size = 1.0/render.bounds[0], .view_far=100.0}});
+		render_finish3d_multisample(&render);
 
+		process_texture_2d(&render, render.bounds, &default_targets.space3d_depth, &ao, texshader_ao, (texshader_params){.ao={.radius = 10.0/render.bounds[0], .samples = 12, .normal=&default_targets.space3d_normal, .seed=(float)frame/500.0}});
 
-		render_texture(&render, render.space3d_tex, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render.bounds[0], .depth=render.space3d_depth, .ao=ao, .ssr=ssr, .rough_metal=render.space3d_rough_metal}});
+		process_texture_2d(&render, ssr_bounds, &default_targets.space3d_rough_metal, &ssr, texshader_ssr, (texshader_params){.ssr={.normal=&default_targets.space3d_normal, .depth=&default_targets.space3d_depth, .size = 1.0/render.bounds[0]}});
+
+		render_texture(&render, &default_targets.space3d_tex, texshader_postproc3d, (texshader_params){.postproc3d={.size=1.0/render.bounds[0], .depth=&default_targets.space3d_depth, .ao=&ao, .shadow=&shadow_targets.space3d_tex, .shadow_depth=&shadow_targets.space3d_depth, .ssr=&ssr, .rough_metal=&default_targets.space3d_rough_metal}});
+		//render_texture(&render, &heightmap, texshader_tex, (texshader_params){});
 
     SDL_GL_SwapWindow(window);
     sdlerr();
@@ -250,7 +279,11 @@ int main(int argc, char** argv) {
               render.bounds[0] = (float)ev.window.data1;
               render.bounds[1] = (float)ev.window.data2;
 
-              update_bounds(&render);
+              update_bounds_main(&render);
+
+							update_bounds(&render);
+							render_update_bounds3d_multisample(&render, &default_targets);
+							render_update_bounds3d_multisample(&render, &shadow_targets);
               break;
             }
           }

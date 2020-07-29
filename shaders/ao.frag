@@ -1,8 +1,8 @@
 #version 400 core
 
 #define RANDOM_DIVISIONS 1000
-#define VIEW_FAR 1000
-#define ANGLE_BIAS 0.1
+#define VIEW_FAR 100
+#define ANGLE_BIAS 0.0
 
 uniform sampler2D tex;
 uniform sampler2D normal;
@@ -28,7 +28,8 @@ vec2 rand(vec2 seed) {
 	P += OFFSET.xyxy;
 	P *= P;
 
-	return fract(P.xz * P.yw * (1.0/SOMELARGEFLOAT));
+	vec2 res = P.xz * P.yw * (1.0/SOMELARGEFLOAT);
+	return fract(res);
 }
 
 vec2 smoothrand(vec2 seed) {
@@ -40,12 +41,22 @@ vec2 smoothrand(vec2 seed) {
 
 void main() {
 	vec3 fragnormal = vec3(texture(normal, fragtexpos));
-	//center hemisphere
-	vec2 pos = vec2(fragtexpos.x - 0.5*fragnormal.z*radius, fragtexpos.y - 0.5*fragnormal.z*radius);
-	vec2 size = vec2(0.5*fragnormal.x + fragnormal.z, 0.5*fragnormal.y + fragnormal.z); //approximate height of hemisphere (z=1, y=0.5)
+	float slope = length(vec2(fragnormal))*(radius/VIEW_FAR);
 
+	//center hemisphere
+	vec2 size = 1.0 - abs(vec2(fragnormal))/2; //approximate height of hemisphere (z=1, y=0.5)
 	size *= radius;
-  
+
+	vec2 size_sgn = sign(vec2(fragnormal))*size;
+
+	vec2 pos = fragtexpos;
+
+	if (size_sgn.x == 0) size_sgn.x = size.x*radius;
+	else if (size_sgn.x < 0) pos += size_sgn.x;
+
+	if (size_sgn.y == 0) size_sgn.y = size.y*radius;
+	else if (size_sgn.y < 0) pos += size_sgn.y;
+	
 	float center_tex = texture(tex, fragtexpos).x;
 	float average_occlusion = 0;
 	float max_length = length(size);
@@ -54,23 +65,27 @@ void main() {
 	float seed_blend = modf(seed, seed_i);
 
 	for (int i=0; i<samples; i++) {
-		vec2 sample_pos = mix(rand(fragtexpos*i + seed_i), rand(fragtexpos*i + seed_i + 1), seed_blend);
+		vec2 posrand = rand(fragtexpos*i);
+		vec2 sample_pos = mix(rand(posrand + seed_i), rand(posrand + seed_i + 1), seed_blend);
 		sample_pos *= size;
   
 		float sample_depth = texture(tex, sample_pos+pos).x;
 		float diff = abs(center_tex-sample_depth);
-		if (sample_depth > center_tex) continue;
+		//if (sample_depth < center_tex) continue;
 
 		float diff_unnormalized = diff*VIEW_FAR;
-		if (diff_unnormalized < ANGLE_BIAS || diff_unnormalized > 1.0) continue;
+		if (diff_unnormalized < ANGLE_BIAS+slope || diff_unnormalized > 1.0) continue;
 
 		float falloff = 1.0 - length(sample_pos)/max_length;
-		//falloff *= falloff;
+		falloff *= 1.0 - diff_unnormalized;
+		falloff *= falloff;
 
-		average_occlusion += diff*1000 * falloff;
+		average_occlusion += max(diff_unnormalized*5*falloff, 0);
 	}
 
 	average_occlusion /= samples;
+	average_occlusion *= max_length/radius;
+
 	outColor = vec4(1.0-average_occlusion, 0.0, 0.0, 1.0);
 	//outColor = vec4(1.0);
 	//outColor = vec4(length(smoothrand(fragtexpos+3)));

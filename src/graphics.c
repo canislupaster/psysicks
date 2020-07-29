@@ -28,20 +28,24 @@
   { 0.0, 0.0, 1.0, 1.0 }
 
 #define CUBEMAP_RES 512
-#define CUBEMAP_BOUNDS (vec2){(float)CUBEMAP_RES, (float)CUBEMAP_RES}
+#define CUBEMAP_BOUNDS \
+  (vec2) { (float)CUBEMAP_RES, (float)CUBEMAP_RES }
 
 #define VIEW_NEAR 0.1
 #define VIEW_FAR 100.0
 #define VIEW_FOV (M_PI / 3)
 
-typedef enum { spacescreen, space3d, spaceuninit } space_t;
+typedef enum { spacescreen, space3d, space3d_ortho, spaceuninit } space_t;
 
 typedef enum {
   shader_fill,
   shader_tex,
   shader_cubemap,
+  shader_height,
   shader_txt,
-  shader_pbr
+  shader_pbr,
+  shader_shadow,
+	shader_none
 } shaderkind;
 
 typedef struct {
@@ -51,7 +55,47 @@ typedef struct {
   vec3 tangent;
 } vertex;
 
-typedef GLuint tex_t;
+typedef struct {
+  GLuint tex;
+  GLenum format;
+  GLenum target;
+} tex_t;
+
+typedef union {
+  struct {
+    vec4 col;
+    tex_t* texture;
+  };
+
+	struct {
+		int compare;
+		tex_t* compare_to;
+		float heightmap_size;
+	} height;
+
+  struct {
+		float* light_dirpos;
+		float softness;
+		float opacity;
+
+		tex_t* height;
+		float heightmap_size;
+	} shadow;
+
+  // heinous hell
+  struct {
+    vec4 col;
+    float metal;
+    float rough;
+    float normal;
+    float occlusion;
+    vec3 emissive;
+
+    struct {
+      GLuint diffuse, normal, emissive, orm;
+    } tex;
+  } pbr;
+} objshader_params;
 
 typedef struct {
   vector_t vertices;
@@ -60,26 +104,7 @@ typedef struct {
   mat4 transform;
 
   shaderkind shader;
-  union {
-    struct {
-      vec4 col;
-      tex_t texture;
-    };
-
-    // heinous hell
-    struct {
-      vec4 col;
-      float metal;
-      float rough;
-      float normal;
-      float occlusion;
-      vec3 emissive;
-
-      struct {
-        GLuint diffuse, normal, emissive, orm;
-      } tex;
-    } pbr;
-  };
+  objshader_params params;
 
   space_t space;
 
@@ -134,6 +159,25 @@ typedef struct {
 } lighting;
 
 typedef struct {
+	struct {
+		tex_t space3d_tex;
+		tex_t space3d_depth;
+		tex_t space3d_normal;
+		tex_t space3d_rough_metal;
+	} multisample;
+
+  tex_t space3d_tex;
+  tex_t space3d_depth;
+  tex_t space3d_normal;
+  tex_t space3d_rough_metal;
+
+  GLuint space3d_fbo_multisampled;
+  GLuint space3d_fbo;
+
+	char space3d_multisample;
+} targets_t;
+
+typedef struct {
   struct {
     obj_shader shader;
     GLint color;
@@ -148,6 +192,13 @@ typedef struct {
     obj_shader shader;
     GLint tex;
   } cubemap;
+
+  struct {
+    obj_shader shader;
+		GLint compare;
+		GLint compare_to;
+		GLint heightmap_size;
+  } height;
 
   struct {
     obj_shader shader;
@@ -172,38 +223,49 @@ typedef struct {
   } pbr;
 
   struct {
+    obj_shader shader;
+    GLint light_dirpos;
+		GLint softness;
+		GLint opacity;
+
+    GLint heightmap;
+		GLint heightmap_size;
+  } shadow;
+
+  struct {
     tex_shader shader;
     GLint size;
   } boxfilter;
 
   struct {
     tex_shader shader;
-		GLint radius;
-		GLint samples;
-		GLint normal;
-		GLint seed;
+    GLint radius;
+    GLint samples;
+    GLint normal;
+    GLint seed;
   } ao;
 
   struct {
     tex_shader shader;
-		GLint normal;
-		GLint depth;
-		GLint size;
-		GLint view_far;
+    GLint normal;
+    GLint depth;
+    GLint size;
+    GLint space;
   } ssr;
 
   struct {
     tex_shader shader;
-		GLint size;
-		GLint depth;
-		GLint ao;
-		GLint ssr;
-		GLint rough_metal;
+    GLint size;
+    GLint depth;
+    GLint ao;
+    GLint shadow;
+    GLint shadow_depth;
+    GLint ssr;
+    GLint rough_metal;
   } postproc3d;
 
   struct {
     tex_shader shader;
-    GLint tex;
   } tex;
 
   FT_Library freetype;
@@ -219,9 +281,12 @@ typedef struct {
 
   mat4 spacescreen;
   mat4 space3d;
+  mat4 space3d_ortho;
   mat4 cam;
 
   space_t space_current;
+	shaderkind shaderkind_current;
+	obj_shader* shader_current;
 
   vector_t pointlights;
   vector_t dirlights;
@@ -236,11 +301,9 @@ typedef struct {
   GLuint tex_fbo;
   object full_rect;
 
-  GLuint space3d_fbo;
-  tex_t space3d_tex;
-  tex_t space3d_depth;
-	tex_t space3d_normal;
-	tex_t space3d_rough_metal;
+  targets_t* targets;
+
+  int samples;
 } render_t;
 
 GLuint vert_shad_new(const char* vert_src) {
@@ -258,7 +321,7 @@ GLuint vert_shad_new(const char* vert_src) {
     errx("shader vert: \n%s\n", err);
   }
 
-	return vert;
+  return vert;
 }
 
 GLuint prog_new(const char* frag_src, GLuint vert) {
@@ -305,7 +368,8 @@ void update_bounds(render_t* render) {
   render->spacescreen[0][0] = 2 / render->bounds[0];
   render->spacescreen[1][1] = 2 / render->bounds[1];
 
-  glm_perspective(VIEW_FOV, render->bounds[0] / render->bounds[1], VIEW_NEAR, VIEW_FAR, render->space3d);
+  glm_perspective(VIEW_FOV, render->bounds[0] / render->bounds[1], VIEW_NEAR,
+                  VIEW_FAR, render->space3d);
 }
 
 void unit_texture(GLuint* tex, GLenum format) {
@@ -318,54 +382,37 @@ void unit_texture(GLuint* tex, GLenum format) {
   glTexImage2D(GL_TEXTURE_2D, 0, format, 1, 1, 0, format, GL_UNSIGNED_BYTE,
                (unsigned char[4]){255, 255, 255, 255});
 }
-/*
-         void unit_cube_texture(GLuint* tex, GLenum format) {
-         glGenTextures(1, tex);
-         glBindTexture(GL_TEXTURE_2D, *tex);
 
-         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, format, 1, 1, 0,
-   format, GL_UNSIGNED_BYTE, (unsigned char[4]){255,255,255,255});
-         }
-         */
 void load_shaders(render_t* render) {
-	GLuint fillvert = vert_shad_new(read_file("shaders/fill.vert"));
+  GLuint fillvert = vert_shad_new(read_file("shaders/fill.vert"));
 
   render->fill.shader = shader_new(read_file("shaders/fill.frag"), fillvert);
   render->fill.color = glGetUniformLocation(render->fill.shader.prog, "color");
 
-	GLuint cubevert = vert_shad_new(read_file("shaders/cubemap.vert"));
+  GLuint posvert = vert_shad_new(read_file("shaders/pos.vert"));
 
-  render->cubemap.shader = shader_new(read_file("shaders/cubemap.frag"), cubevert);
+  render->cubemap.shader =
+      shader_new(read_file("shaders/cubemap.frag"), posvert);
   render->cubemap.tex =
       glGetUniformLocation(render->cubemap.shader.prog, "tex");
 
-	GLuint tex3dvert = vert_shad_new(read_file("shaders/tex3d.vert"));
+  render->height.shader = shader_new(read_file("shaders/height.frag"), posvert);
+	render->height.compare = glGetUniformLocation(render->height.shader.prog, "compare");
+	render->height.compare_to = glGetUniformLocation(render->height.shader.prog, "compare_to");
+	render->height.heightmap_size = glGetUniformLocation(render->height.shader.prog, "heightmap_size");
+
+  GLuint tex3dvert = vert_shad_new(read_file("shaders/tex3d.vert"));
 
   render->tex3d.shader = shader_new(read_file("shaders/tex3d.frag"), tex3dvert);
   render->tex3d.tex = glGetUniformLocation(render->tex3d.shader.prog, "tex");
 
-  render->txt.shader =
-      shader_new(read_file("shaders/txt.frag"), tex3dvert);
+  render->txt.shader = shader_new(read_file("shaders/txt.frag"), tex3dvert);
   render->txt.color = glGetUniformLocation(render->txt.shader.prog, "color");
   render->txt.tex = glGetUniformLocation(render->txt.shader.prog, "tex");
 
-	GLuint pbrvert = vert_shad_new(read_file("shaders/pbr.vert"));
+  GLuint pbrvert = vert_shad_new(read_file("shaders/pbr.vert"));
 
-  render->pbr.shader =
-      shader_new(read_file("shaders/pbr.frag"), pbrvert);
+  render->pbr.shader = shader_new(read_file("shaders/pbr.frag"), pbrvert);
   render->pbr.color = glGetUniformLocation(render->pbr.shader.prog, "color");
   render->pbr.emissive =
       glGetUniformLocation(render->pbr.shader.prog, "emissive");
@@ -391,33 +438,58 @@ void load_shaders(render_t* render) {
       glGetUniformBlockIndex(render->pbr.shader.prog, "lighting");
   glUniformBlockBinding(render->pbr.shader.prog, pbr_lighting, 1);
 
-	GLuint texvert = vert_shad_new(read_file("shaders/tex.vert"));
+  GLuint shadowvert = vert_shad_new(read_file("shaders/shadow.vert"));
 
-  render->boxfilter.shader = tex_shader_new(read_file("shaders/boxfilter.frag"), texvert);
+  render->shadow.shader =
+      shader_new(read_file("shaders/shadow.frag"), shadowvert);
+  render->shadow.light_dirpos =
+      glGetUniformLocation(render->shadow.shader.prog, "light_dirpos");
+  render->shadow.softness =
+      glGetUniformLocation(render->shadow.shader.prog, "softness");
+  render->shadow.opacity =
+      glGetUniformLocation(render->shadow.shader.prog, "opacity");
+
+  render->shadow.heightmap =
+      glGetUniformLocation(render->shadow.shader.prog, "heightmap");
+  render->shadow.heightmap_size =
+      glGetUniformLocation(render->shadow.shader.prog, "heightmap_size");
+
+  GLuint texvert = vert_shad_new(read_file("shaders/tex.vert"));
+
+  render->boxfilter.shader =
+      tex_shader_new(read_file("shaders/boxfilter.frag"), texvert);
   render->boxfilter.size =
       glGetUniformLocation(render->boxfilter.shader.prog, "size");
 
-  render->ao.shader =
-      tex_shader_new(read_file("shaders/ao.frag"), texvert);
-	render->ao.radius = glGetUniformLocation(render->ao.shader.prog, "radius");
-	render->ao.samples = glGetUniformLocation(render->ao.shader.prog, "samples");
-	render->ao.normal = glGetUniformLocation(render->ao.shader.prog, "normal");
-	render->ao.seed = glGetUniformLocation(render->ao.shader.prog, "seed");
+  render->ao.shader = tex_shader_new(read_file("shaders/ao.frag"), texvert);
+  render->ao.radius = glGetUniformLocation(render->ao.shader.prog, "radius");
+  render->ao.samples = glGetUniformLocation(render->ao.shader.prog, "samples");
+  render->ao.normal = glGetUniformLocation(render->ao.shader.prog, "normal");
+  render->ao.seed = glGetUniformLocation(render->ao.shader.prog, "seed");
 
   render->ssr.shader = tex_shader_new(read_file("shaders/ssr.frag"), texvert);
-	render->ssr.normal = glGetUniformLocation(render->ssr.shader.prog, "normal");
-	render->ssr.depth = glGetUniformLocation(render->ssr.shader.prog, "depth");
-	render->ssr.size = glGetUniformLocation(render->ssr.shader.prog, "size");
-	render->ssr.view_far = glGetUniformLocation(render->ssr.shader.prog, "view_far");
-
+  render->ssr.normal = glGetUniformLocation(render->ssr.shader.prog, "normal");
+  render->ssr.depth = glGetUniformLocation(render->ssr.shader.prog, "depth");
+  render->ssr.size = glGetUniformLocation(render->ssr.shader.prog, "size");
+  render->ssr.space =
+      glGetUniformLocation(render->ssr.shader.prog, "space");
 
   render->postproc3d.shader =
       tex_shader_new(read_file("shaders/postprocess3d.frag"), texvert);
-	render->postproc3d.size = glGetUniformLocation(render->postproc3d.shader.prog, "size");
-	render->postproc3d.depth = glGetUniformLocation(render->postproc3d.shader.prog, "depth");
-	render->postproc3d.ao = glGetUniformLocation(render->postproc3d.shader.prog, "ao");
-	render->postproc3d.ssr = glGetUniformLocation(render->postproc3d.shader.prog, "ssr");
-	render->postproc3d.rough_metal = glGetUniformLocation(render->postproc3d.shader.prog, "rough_metal");
+  render->postproc3d.size =
+      glGetUniformLocation(render->postproc3d.shader.prog, "size");
+  render->postproc3d.depth =
+      glGetUniformLocation(render->postproc3d.shader.prog, "depth");
+  render->postproc3d.ao =
+      glGetUniformLocation(render->postproc3d.shader.prog, "ao");
+  render->postproc3d.shadow =
+      glGetUniformLocation(render->postproc3d.shader.prog, "shadow");
+  render->postproc3d.shadow_depth =
+      glGetUniformLocation(render->postproc3d.shader.prog, "shadow_depth");
+  render->postproc3d.ssr =
+      glGetUniformLocation(render->postproc3d.shader.prog, "ssr");
+  render->postproc3d.rough_metal =
+      glGetUniformLocation(render->postproc3d.shader.prog, "rough_metal");
 
   render->tex.shader = tex_shader_new(read_file("shaders/tex.frag"), texvert);
 }
@@ -428,13 +500,69 @@ void add_cube(object* obj, vec3 start, vec3 end);
 object object_new();
 void object_init(object* obj);
 tex_t tex_new();
+tex_t tex_new_multisample();
+void render_update_bounds3d_multisample(render_t* render, targets_t* targets);
+void render_update_bounds3d(render_t* render, targets_t* targets);
 
-render_t render_new(vec2 bounds) {
+targets_t targets_new(render_t* render, char multisample) {
+  targets_t targets;
+
+	if (multisample) {
+		targets.multisample.space3d_tex = tex_new_multisample();
+		targets.multisample.space3d_depth = tex_new_multisample();
+		targets.multisample.space3d_normal = tex_new_multisample();
+		targets.multisample.space3d_rough_metal = tex_new_multisample();
+
+		targets.multisample.space3d_tex.format = GL_RGBA;
+		targets.multisample.space3d_depth.format = GL_DEPTH_COMPONENT32F;
+		targets.multisample.space3d_normal.format = GL_RGB;
+		targets.multisample.space3d_rough_metal.format = GL_RGB;
+	}
+
+  targets.space3d_tex = tex_new();
+  targets.space3d_depth = tex_new();
+  targets.space3d_normal = tex_new();
+  targets.space3d_rough_metal = tex_new();
+
+	targets.space3d_tex.format = GL_RGBA;
+	targets.space3d_depth.format = GL_DEPTH_COMPONENT32F;
+  targets.space3d_normal.format = GL_RGB;
+  targets.space3d_rough_metal.format = GL_RGB;
+
+  if (multisample) {
+		glGenFramebuffers(1, &targets.space3d_fbo_multisampled);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, targets.space3d_fbo_multisampled);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glCullFace(GL_BACK);
+	}
+
+  glGenFramebuffers(1, &targets.space3d_fbo);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, targets.space3d_fbo);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glCullFace(GL_BACK);
+
+	targets.space3d_multisample = multisample;
+
+	if (multisample) render_update_bounds3d_multisample(render, &targets);
+	else render_update_bounds3d(render, &targets);
+
+  return targets;
+}
+
+render_t render_new(vec2 bounds, int samples) {
   render_t render;
+  render.samples = samples;
   render.space_current = spaceuninit;
+
+	render.shaderkind_current = shader_none;
 
   glm_vec2_copy(bounds, render.bounds);
   update_bounds(&render);
+
+  glm_mat4_identity(render.space3d_ortho);
+  render.space3d_ortho[2][2] = 1.0 / VIEW_FAR;
 
   glm_mat4_identity(render.cam);
 
@@ -456,20 +584,8 @@ render_t render_new(vec2 bounds) {
   // set texture fbo for processing textures
   glGenFramebuffers(1, &render.tex_fbo);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, render.tex_fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, render.tex_fbo);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	
-  // set 3d fbo for 3d postprocessing
-  glGenFramebuffers(1, &render.space3d_fbo);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, render.space3d_fbo);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glCullFace(GL_BACK);
-
-  render.space3d_tex = tex_new();
-  render.space3d_depth = tex_new();
-  render.space3d_normal = tex_new();
-	render.space3d_rough_metal = tex_new();
 
   // set default texture
   unit_texture(&render.default_tex, GL_RGBA);
@@ -530,6 +646,7 @@ void object_init(object* obj) {
   GLERR;
 
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vertex),
+	
                         (void*)offsetof(vertex, pos));
   glEnableVertexAttribArray(0);
 
@@ -601,8 +718,10 @@ void add_tangents(object* obj) {
 
 tex_t tex_new() {
   tex_t tex;
-  glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_2D, tex);
+  glGenTextures(1, &tex.tex);
+  glBindTexture(GL_TEXTURE_2D, tex.tex);
+
+  tex.target = GL_TEXTURE_2D;
 
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -614,30 +733,42 @@ tex_t tex_new() {
   return tex;
 }
 
-void tex_default(tex_t tex, vec2 bounds) {
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (int)bounds[0], (int)bounds[1], 0,
-               GL_RGBA, GL_FLOAT, NULL);
+tex_t tex_new_multisample() {
+  tex_t tex;
+  glGenTextures(1, &tex.tex);
+  tex.target = GL_TEXTURE_2D_MULTISAMPLE;
+
+  return tex;
 }
 
-void tex_default_rgb(tex_t tex, vec2 bounds) {
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, (int)bounds[0], (int)bounds[1], 0,
-               GL_RGB, GL_FLOAT, NULL);
+//sometimes simplifies long lines
+//! don't use for non-generic textures!
+void tex_bind(tex_t* tex) {
+	glBindTexture(tex->target, tex->tex);
 }
 
-void tex_single_channel(tex_t tex, vec2 bounds) {
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, (int)bounds[0], (int)bounds[1], 0,
-               GL_RED, GL_FLOAT, NULL);
+void tex_default(tex_t* tex, GLenum format, vec2 bounds) {
+  glBindTexture(GL_TEXTURE_2D, tex->tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, format, (int)bounds[0], (int)bounds[1], 0,
+               format, GL_FLOAT, NULL);
+
+  tex->format = format;
 }
 
-void tex_free(tex_t tex) { glDeleteTextures(1, &tex); };
+void tex_default_multisample(tex_t* tex, GLenum format, vec2 bounds, int samples) {
+  glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex->tex);
+  glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA8,
+                          (int)bounds[0], (int)bounds[1], GL_FALSE);
+
+  tex->format = GL_RGBA;
+}
+
+void tex_free(tex_t* tex) { glDeleteTextures(1, &tex->tex); };
 
 typedef enum {
   texshader_boxfilter,
-	texshader_ao,
-	texshader_ssr,
+  texshader_ao,
+  texshader_ssr,
   texshader_postproc3d,
   texshader_tex
 } texshader_type;
@@ -646,31 +777,32 @@ typedef union {
   struct {
     float size;
   } boxfilter;
-	struct {
-		float size;
-		tex_t depth;
-		tex_t ao; //ao (non-blurred)
-		tex_t ssr; //ssr (non-blurred)
-		tex_t rough_metal;
-	} postproc3d;
-	struct {
-		float radius;
-		int samples;
-		tex_t normal; //tex = depth
-		float seed;
-	} ao;
-	struct {
-		tex_t normal;
-		tex_t depth;
-		float size;
-		float view_far;
-	} ssr;
+  struct {
+    float size;
+    tex_t* depth;
+    tex_t* ao;  // ao (non-blurred)
+    tex_t* shadow;
+    tex_t* shadow_depth;
+    tex_t* ssr;  // ssr (non-blurred)
+    tex_t* rough_metal;
+  } postproc3d;
+  struct {
+    float radius;
+    int samples;
+    tex_t* normal;  // tex = depth
+    float seed;
+  } ao;
+  struct {
+    tex_t* normal;
+    tex_t* depth;
+    float size;
+  } ssr;
 } texshader_params;
 
-void shade_texture(render_t* render, tex_t tex, texshader_type shadtype,
+void shade_texture(render_t* render, tex_t* tex, texshader_type shadtype,
                    texshader_params params) {
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, tex);
+  tex_bind(tex);
   GLERR;
 
   tex_shader* shad;
@@ -678,14 +810,18 @@ void shade_texture(render_t* render, tex_t tex, texshader_type shadtype,
     case texshader_boxfilter:
       shad = &render->boxfilter.shader;
       break;
-		case texshader_ao: shad = &render->ao.shader; break;
-		case texshader_ssr: shad = &render->ssr.shader; break;
+    case texshader_ao:
+      shad = &render->ao.shader;
+      break;
+    case texshader_ssr:
+      shad = &render->ssr.shader;
+      break;
     case texshader_postproc3d:
       shad = &render->postproc3d.shader;
       break;
     case texshader_tex:
       shad = &render->tex.shader;
-			break;
+      break;
   }
 
   glUseProgram(shad->prog);
@@ -696,49 +832,57 @@ void shade_texture(render_t* render, tex_t tex, texshader_type shadtype,
       glUniform1f(render->boxfilter.size, params.boxfilter.size);
       break;
     };
-		case texshader_ao: {
-			glUniform1f(render->ao.radius, params.ao.radius);
-			glUniform1i(render->ao.samples, params.ao.samples);
-			glUniform1f(render->ao.seed, params.ao.seed);
+    case texshader_ao: {
+      glUniform1f(render->ao.radius, params.ao.radius);
+      glUniform1i(render->ao.samples, params.ao.samples);
+      glUniform1f(render->ao.seed, params.ao.seed);
 
-			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, params.ao.normal);
-			glUniform1i(render->ao.normal, 1);
-			break;
-		};
-		case texshader_ssr: {
-			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, params.ssr.normal);
-			glUniform1i(render->ssr.normal, 1);
+      glActiveTexture(GL_TEXTURE1);
+      tex_bind(params.ao.normal);
+      glUniform1i(render->ao.normal, 1);
+      break;
+    };
+    case texshader_ssr: {
+      glActiveTexture(GL_TEXTURE1);
+			tex_bind(params.ssr.normal);
+      glUniform1i(render->ssr.normal, 1);
 
-			glActiveTexture(GL_TEXTURE2);
-			glBindTexture(GL_TEXTURE_2D, params.ssr.depth);
-			glUniform1i(render->ssr.depth, 2);
+      glActiveTexture(GL_TEXTURE2);
+      tex_bind(params.ssr.depth);
+      glUniform1i(render->ssr.depth, 2);
 
-			glUniform1f(render->ssr.size, params.ssr.size);
-			glUniform1f(render->ssr.view_far, params.ssr.view_far);
-			break;
-		};
-		case texshader_postproc3d: {
-			glUniform1f(render->postproc3d.size, params.postproc3d.size);
+      glUniform1f(render->ssr.size, params.ssr.size);
+      glUniformMatrix4fv(render->ssr.space, 1, GL_FALSE, render->space3d[0]);
+      break;
+    };
+    case texshader_postproc3d: {
+      glUniform1f(render->postproc3d.size, params.postproc3d.size);
 
-			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, params.postproc3d.depth);
-			glUniform1i(render->postproc3d.depth, 1);
+      glActiveTexture(GL_TEXTURE1);
+      tex_bind(params.postproc3d.depth);
+      glUniform1i(render->postproc3d.depth, 1);
 
-			glActiveTexture(GL_TEXTURE2);
-			glBindTexture(GL_TEXTURE_2D, params.postproc3d.ao);
-			glUniform1i(render->postproc3d.ao, 2);
+      glActiveTexture(GL_TEXTURE2);
+      tex_bind(params.postproc3d.ao);
+      glUniform1i(render->postproc3d.ao, 2);
 
-			glActiveTexture(GL_TEXTURE3);
-			glBindTexture(GL_TEXTURE_2D, params.postproc3d.ssr);
-			glUniform1i(render->postproc3d.ssr, 3);
+      glActiveTexture(GL_TEXTURE3);
+      tex_bind(params.postproc3d.shadow);
+      glUniform1i(render->postproc3d.shadow, 3);
 
-			glActiveTexture(GL_TEXTURE4);
-			glBindTexture(GL_TEXTURE_2D, params.postproc3d.rough_metal);
-			glUniform1i(render->postproc3d.rough_metal, 4);
-			break;
-		};
+      glActiveTexture(GL_TEXTURE4);
+      tex_bind(params.postproc3d.shadow_depth);
+      glUniform1i(render->postproc3d.shadow_depth, 4);
+
+      glActiveTexture(GL_TEXTURE5);
+      tex_bind(params.postproc3d.ssr);
+      glUniform1i(render->postproc3d.ssr, 5);
+
+      glActiveTexture(GL_TEXTURE6);
+      tex_bind(params.postproc3d.rough_metal);
+      glUniform1i(render->postproc3d.rough_metal, 6);
+      break;
+    };
     default:;
   }
 
@@ -750,81 +894,104 @@ void shade_texture(render_t* render, tex_t tex, texshader_type shadtype,
   GLERR;
 }
 
-void process_texture(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out,
+void process_texture(render_t* render, vec2 bounds, tex_t* tex, tex_t* tex_out,
                      GLenum tex_out_target, int level, texshader_type shadtype,
                      texshader_params params) {
-
   glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
-	glViewport(0, 0, (int)bounds[0], (int)bounds[1]);
+  glViewport(0, 0, (int)bounds[0], (int)bounds[1]);
 
   GLERR;
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex_out_target,
-                         tex_out, level);
+                         tex_out->tex, level);
 
-  glClearColor(0.0, 0.0, 0.0, 0.0);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   GLERR;
 
   GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
   if (status != GL_FRAMEBUFFER_COMPLETE) errx("%u", status);
 
+  glClearColor(0.0, 0.0, 0.0, 0.0);
+  glClear(GL_COLOR_BUFFER_BIT);
+  GLERR;
+
   shade_texture(render, tex, shadtype, params);
 }
 
-void process_texture_2d(render_t* render, vec2 bounds, tex_t tex, tex_t tex_out, texshader_type shadtype, texshader_params params) {
-	process_texture(render, bounds, tex, tex_out, GL_TEXTURE_2D, 0, shadtype, params);
+//uses texture's target (works with multisampling)
+void process_texture_2d(render_t* render, vec2 bounds, tex_t* tex,
+                        tex_t* tex_out, texshader_type shadtype,
+                        texshader_params params) {
+  process_texture(render, bounds, tex, tex_out, tex_out->target, 0, shadtype,
+                  params);
 }
 
-void render_texture(render_t* render, tex_t tex, texshader_type shadtype,
-                   texshader_params params) {
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(0, 0, (int)render->bounds[0], (int)render->bounds[1]);
+void render_texture(render_t* render, tex_t* tex, texshader_type shadtype,
+                    texshader_params params) {
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, (int)render->bounds[0], (int)render->bounds[1]);
 
-	shade_texture(render, tex, shadtype, params);
+  shade_texture(render, tex, shadtype, params);
 }
 
-void copy_proc_texture(render_t* render, tex_t out, vec2 bounds) {
-  glBindTexture(GL_TEXTURE_2D, out);
+void copy_proc_texture(render_t* render, tex_t* out, vec2 bounds) {
+  glBindTexture(GL_TEXTURE_2D, out->tex);
   glBindFramebuffer(GL_FRAMEBUFFER, render->tex_fbo);
 
   glReadBuffer(GL_COLOR_ATTACHMENT0);
-  glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 0, 0, (int)bounds[0], (int)bounds[1], 0);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, out->format, 0, 0, (int)bounds[0],
+                   (int)bounds[1], 0);
 }
 
-void convolve_side(render_t* render, GLenum side, tex_t cubemap, tex_t tex) {
+void copy_3d_texture(render_t* render, tex_t* out, vec2 bounds) {
+  glBindTexture(GL_TEXTURE_2D, out->tex);
+  glBindFramebuffer(GL_FRAMEBUFFER, render->targets->space3d_fbo);
+
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glCopyTexImage2D(GL_TEXTURE_2D, 0, out->format, 0, 0, (int)bounds[0],
+                   (int)bounds[1], 0);
+}
+
+void convolve_side(render_t* render, GLenum side, tex_t* cubemap, tex_t* tex) {
   int level = 1;
 
   for (int new_c = CUBEMAP_RES / 2; new_c >= 1; new_c /= 2) {
-		//until there is a vec2i, im going to pretend like there is no casting
-		vec2 bounds = {(float)new_c, (float)new_c};
+    // until there is a vec2i, im going to pretend like there is no casting
+    vec2 bounds = {(float)new_c, (float)new_c};
 
-		glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap);
-    glTexImage2D(side, level, GL_RGB16F, new_c, new_c, 0, GL_RGB, GL_FLOAT,
+    glBindTexture(GL_TEXTURE_CUBE_MAP, cubemap->tex);
+    glTexImage2D(side, level, cubemap->format, new_c, new_c, 0, GL_RGB, GL_FLOAT,
                  NULL);
     process_texture(
         render, bounds, tex, cubemap, side, level, texshader_boxfilter,
         (texshader_params){.boxfilter = {.size = 0.5 / (float)new_c}});
 
-		copy_proc_texture(render, tex, bounds);
+    copy_proc_texture(render, tex, bounds);
 
     level++;
   }
 }
 
-void convolve_side_data(render_t* render, GLenum side, tex_t tex, void* data) {
-	tex_t tex_data = tex_new();
-	glBindTexture(GL_TEXTURE_2D, tex_data); //bind explicitly
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, data);
+void convolve_side_data(render_t* render, GLenum side, tex_t* tex, void* data) {
+  tex_t tex_data = tex_new();
+	tex_data.target = GL_TEXTURE_2D;
+	tex_data.format = GL_RGB16F;
 
-  convolve_side(render, side, tex, tex_data);
-  tex_free(tex_data);
+  glBindTexture(GL_TEXTURE_2D, tex_data.tex);  // bind explicitly
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB,
+               GL_FLOAT, data);
+
+  convolve_side(render, side, tex, &tex_data);
+  tex_free(&tex_data);
   GLERR;
 }
 
-tex_t cubemap_new(render_t* render, void* up, void* down, void* left, void* right, void* front, void* back) {
+tex_t cubemap_new(render_t* render, void* up, void* down, void* left,
+                  void* right, void* front, void* back) {
   tex_t tex;
-  glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_CUBE_MAP, tex);
+  tex.format = GL_RGB16F;
+  tex.target = GL_TEXTURE_CUBE_MAP;
+
+  glGenTextures(1, &tex.tex);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, tex.tex);
   glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
                CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, up);
   glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGB16F, CUBEMAP_RES,
@@ -846,7 +1013,7 @@ tex_t cubemap_new(render_t* render, void* up, void* down, void* left, void* righ
   GLERR;
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   GLERR;
-	return tex;
+  return tex;
 }
 
 tex_t load_hdri(render_t* render, char* hdri) {
@@ -938,14 +1105,14 @@ tex_t load_hdri(render_t* render, char* hdri) {
 
   drop(data);
 
-	tex_t tex = cubemap_new(render, up, down, left, right, front, back);
+  tex_t tex = cubemap_new(render, up, down, left, right, front, back);
 
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Y, tex, up);
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, tex, down);
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_X, tex, left);
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_X, tex, right);
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, tex, front);
-  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Z, tex, back);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Y, &tex, up);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, &tex, down);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_X, &tex, left);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_X, &tex, right);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, &tex, front);
+  convolve_side_data(render, GL_TEXTURE_CUBE_MAP_POSITIVE_Z, &tex, back);
 
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER,
                   GL_LINEAR_MIPMAP_LINEAR);
@@ -962,104 +1129,152 @@ tex_t load_hdri(render_t* render, char* hdri) {
   return tex;
 }
 
-void render_object(render_t* render, object* obj) {
+void render_object_shader_space(render_t* render, object* obj,
+                                shaderkind shader, objshader_params* params,
+                                space_t space) {
   glBindBuffer(GL_UNIFORM_BUFFER, render->uniform_buffer);
 
   if (render->space_current != obj->space) {
-    vec4* spacemat =
-        obj->space == spacescreen ? render->spacescreen : render->space3d;
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(mat4), spacemat);
+    vec4* spacemat;
+    vec4* cam;
 
-    vec4* cam = obj->space == spacescreen ? GLM_MAT4_IDENTITY : render->cam;
+    switch (space) {
+      case space3d: {
+        spacemat = render->space3d;
+        cam = render->cam;
+        break;
+      }
+      case space3d_ortho: {
+        spacemat = render->space3d_ortho;
+        cam = render->cam;
+        break;
+      }
+      case spacescreen: {
+        spacemat = render->spacescreen;
+        cam = GLM_MAT4_IDENTITY;
+        break;
+      }
+      case spaceuninit:
+        break;
+    }
+
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(mat4), spacemat);
     glBufferSubData(GL_UNIFORM_BUFFER, sizeof(mat4), sizeof(mat4), cam);
 
     render->space_current = obj->space;
   }
 
-  if (obj->space == space3d) {
-    glBindFramebuffer(GL_FRAMEBUFFER, render->space3d_fbo);
-  } else {
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	obj_shader* shad;
+
+	if (render->shaderkind_current != shader) {
+		switch (shader) {
+			case shader_tex:
+				shad = &render->tex3d.shader;
+				break;
+			case shader_cubemap:
+				shad = &render->cubemap.shader;
+				break;
+			case shader_height:
+				shad = &render->height.shader;
+				break;
+			case shader_txt:
+				shad = &render->txt.shader;
+				break;
+			case shader_fill:
+				shad = &render->fill.shader;
+				break;
+			case shader_pbr:
+				shad = &render->pbr.shader;
+				break;
+			case shader_shadow:
+				shad = &render->shadow.shader;
+				break;
+			case shader_none: return; //TODO: should probably return an error
+		}
+
+		glUseProgram(shad->prog);
+
+		render->shaderkind_current = shader;
+		render->shader_current = shad;
+	} else {
+		shad = render->shader_current;
 	}
+
+  if (obj->space == space3d || obj->space == space3d_ortho) {
+    glBindFramebuffer(GL_FRAMEBUFFER, render->targets->space3d_multisample ? render->targets->space3d_fbo_multisampled : render->targets->space3d_fbo);
+  } else {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
 
   glViewport(0, 0, (int)render->bounds[0], (int)render->bounds[1]);
 
   GLERR;
 
-  obj_shader* shad;
-  switch (obj->shader) {
-    case shader_tex:
-      shad = &render->tex3d.shader;
-      break;
-    case shader_cubemap:
-      shad = &render->cubemap.shader;
-      break;
-    case shader_txt:
-      shad = &render->txt.shader;
-      break;
-    case shader_fill:
-      shad = &render->fill.shader;
-      break;
-    case shader_pbr:
-      shad = &render->pbr.shader;
-      break;
-  }
-
-  glUseProgram(shad->prog);
-
-  switch (obj->shader) {
+  switch (shader) {
     case shader_tex: {
       glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->texture);
+      tex_bind(params->texture);
       glUniform1i(render->tex3d.tex, 0);
       break;
     }
     case shader_cubemap: {
       glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_CUBE_MAP, obj->texture);
+      glBindTexture(GL_TEXTURE_CUBE_MAP, params->texture->tex);
       glUniform1i(render->cubemap.tex, 0);
       break;
     }
     case shader_fill: {
-      glUniform4fv(render->fill.color, 1, obj->col);
+      glUniform4fv(render->fill.color, 1, params->col);
       break;
     }
+		case shader_height: {
+			glUniform1i(render->height.compare, params->height.compare);
+			
+			if (params->height.compare) {
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, params->height.compare_to->tex);
+				glUniform1i(render->height.compare_to, 0);
+
+				glUniform1f(render->height.heightmap_size, params->height.heightmap_size);
+			}
+			break;
+		}
     case shader_txt: {
-      glUniform4fv(render->txt.color, 1, obj->col);
+      glUniform4fv(render->txt.color, 1, params->col);
 
       glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->texture);
+      tex_bind(params->texture);
       glUniform1i(render->txt.tex, 0);
       break;
     }
     case shader_pbr: {
       glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.diffuse);
+      glBindTexture(GL_TEXTURE_2D, params->pbr.tex.diffuse);
       glUniform1i(render->pbr.tex.diffuse, 0);
       glActiveTexture(GL_TEXTURE1);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.emissive);
+      glBindTexture(GL_TEXTURE_2D, params->pbr.tex.emissive);
       glUniform1i(render->pbr.tex.emissive, 1);
       glActiveTexture(GL_TEXTURE2);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.normal);
+      glBindTexture(GL_TEXTURE_2D, params->pbr.tex.normal);
       glUniform1i(render->pbr.tex.normal, 2);
       glActiveTexture(GL_TEXTURE3);
-      glBindTexture(GL_TEXTURE_2D, obj->pbr.tex.orm);
+      glBindTexture(GL_TEXTURE_2D, params->pbr.tex.orm);
       glUniform1i(render->pbr.tex.orm, 3);
-      glUniform4fv(render->pbr.color, 1, obj->pbr.col);
+      glUniform4fv(render->pbr.color, 1, params->pbr.col);
 
-      glUniform3fv(render->pbr.emissive, 1, obj->pbr.emissive);
-      glUniform1f(render->pbr.metal, obj->pbr.metal);
-      glUniform1f(render->pbr.rough, obj->pbr.rough);
-      glUniform1f(render->pbr.occlusion, obj->pbr.occlusion);
+      glUniform3fv(render->pbr.emissive, 1, params->pbr.emissive);
+      glUniform1f(render->pbr.metal, params->pbr.metal);
+      glUniform1f(render->pbr.rough, params->pbr.rough);
+      glUniform1f(render->pbr.occlusion, params->pbr.occlusion);
 
       if (render->ibl.global_env_enabled) {
         glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, render->global_env);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, render->global_env.tex);
       }
 
       if (render->ibl.local_env_enabled) {
         glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, render->local_env);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, render->local_env.tex);
       }
 
       glUniform1i(render->pbr.global_env, 4);
@@ -1067,6 +1282,21 @@ void render_object(render_t* render, object* obj) {
 
       break;
     }
+    case shader_shadow: {
+      glUniform3fv(render->shadow.light_dirpos, 1, params->shadow.light_dirpos);
+			glUniform1f(render->shadow.softness, params->shadow.softness);
+			glUniform1f(render->shadow.opacity, params->shadow.opacity);
+
+			glUniform1f(render->shadow.heightmap_size, params->shadow.heightmap_size);
+
+      glActiveTexture(GL_TEXTURE0);
+      tex_bind(params->shadow.height);
+      glUniform1i(render->shadow.heightmap, 0);
+
+      break;
+    }
+    default:
+      break;
   }
 
   GLERR;
@@ -1077,50 +1307,23 @@ void render_object(render_t* render, object* obj) {
   glBindVertexArray(obj->vao);
   GLERR;
 
-	//glEnable(GL_CULL_FACE);
+  // glEnable(GL_CULL_FACE);
   glDrawElements(GL_TRIANGLES, obj->elements.length, GL_UNSIGNED_INT, 0);
-	//glDisable(GL_CULL_FACE);
+  // glDisable(GL_CULL_FACE);
   GLERR;
 }
 
-// call before frame to reset spaces and fix lights
+// render using object's coupled shader parameters
+void render_object(render_t* render, object* obj) {
+  render_object_shader_space(render, obj, obj->shader, &obj->params,
+                             obj->space);
+}
+
 void render_reset(render_t* render) {
-  glClearColor(0.0, 0.0, 0.0, 1.0);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-  glBindFramebuffer(GL_FRAMEBUFFER, render->space3d_fbo);
-
-  tex_default(render->space3d_tex, render->bounds);
-  GLERR;
-
-  glBindTexture(GL_TEXTURE_2D, render->space3d_tex);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                         render->space3d_tex, 0);
-
-	glBindTexture(GL_TEXTURE_2D, render->space3d_normal);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, render->bounds[0], render->bounds[1], 0, GL_RGB, GL_FLOAT, NULL);
-
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, render->space3d_normal, 0);
-
-	tex_default_rgb(render->space3d_rough_metal, render->bounds);
-
-	glBindTexture(GL_TEXTURE_2D, render->space3d_rough_metal);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, render->space3d_rough_metal, 0);
-
-  glBindTexture(GL_TEXTURE_2D, render->space3d_depth);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, render->bounds[0],
-               render->bounds[1], 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
-                         render->space3d_depth, 0);
-
-  glClearColor(0.0, 0.0, 0.0, 1.0);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-  GLERR;
-
-	glDrawBuffers(3, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2});
-	
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
   render->space_current = spaceuninit;
 
@@ -1145,6 +1348,141 @@ void render_reset(render_t* render) {
 
   glBufferSubData(GL_UNIFORM_BUFFER, offsetof(lighting, ibl),
                   sizeof(ibl_lighting), &render->ibl);
+}
+
+void render_reset3d_multisample(render_t* render, targets_t* targets) {
+	render->targets = targets;
+	render->targets->space3d_multisample = 1;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, render->targets->space3d_fbo_multisampled);
+
+  glDrawBuffers(3, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                              GL_COLOR_ATTACHMENT2});
+
+  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  GLERR;
+}
+
+void render_reset3d(render_t* render, targets_t* targets) {
+	render->targets = targets;
+	render->targets->space3d_multisample = 0;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, render->targets->space3d_fbo);
+
+  glDrawBuffers(3, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                              GL_COLOR_ATTACHMENT2});
+
+  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  GLERR;
+}
+
+void render_finish3d_multisample(render_t* render) {
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, render->targets->space3d_fbo);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, render->targets->space3d_fbo_multisampled);
+
+  glDrawBuffers(3, (GLenum[]){GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                              GL_COLOR_ATTACHMENT2});
+
+  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  GLERR;
+
+	glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glDrawBuffer(GL_COLOR_ATTACHMENT0);
+	glBlitFramebuffer(0,0,render->bounds[0],render->bounds[1],0,0,render->bounds[0],render->bounds[1], GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glReadBuffer(GL_COLOR_ATTACHMENT1);
+  glDrawBuffer(GL_COLOR_ATTACHMENT1);
+	glBlitFramebuffer(0,0,render->bounds[0],render->bounds[1],0,0,render->bounds[0],render->bounds[1], GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glReadBuffer(GL_COLOR_ATTACHMENT2);
+  glDrawBuffer(GL_COLOR_ATTACHMENT2);
+	glBlitFramebuffer(0,0,render->bounds[0],render->bounds[1],0,0,render->bounds[0],render->bounds[1], GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBlitFramebuffer(0,0,render->bounds[0],render->bounds[1],0,0,render->bounds[0],render->bounds[1], GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+	GLERR;
+}
+
+void render_update_bounds3d(render_t* render, targets_t* targets) {
+  glBindFramebuffer(GL_FRAMEBUFFER, targets->space3d_fbo);
+
+  glBindTexture(GL_TEXTURE_2D, targets->space3d_tex.tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, render->bounds[0], render->bounds[1], 0, GL_RGBA, GL_FLOAT, NULL);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         targets->space3d_tex.tex, 0);
+
+  glBindTexture(GL_TEXTURE_2D, targets->space3d_normal.tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8,
+                          render->bounds[0], render->bounds[1], 0, GL_RGB, GL_FLOAT, NULL);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                         GL_TEXTURE_2D,
+                         targets->space3d_normal.tex, 0);
+
+  glBindTexture(GL_TEXTURE_2D,
+                targets->space3d_rough_metal.tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8,
+                          render->bounds[0], render->bounds[1], 0, GL_RGB, GL_FLOAT, NULL);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D,
+                         targets->space3d_rough_metal.tex, 0);
+  GLERR;
+
+  glBindTexture(GL_TEXTURE_2D, targets->space3d_depth.tex);
+  glTexImage2D(GL_TEXTURE_2D, 0,
+                          GL_DEPTH_COMPONENT32F, render->bounds[0],
+                          render->bounds[1], 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                         targets->space3d_depth.tex, 0);
+  GLERR;
+}
+
+void render_update_bounds3d_multisample(render_t* render, targets_t* targets) {
+	render_update_bounds3d(render, targets);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, targets->space3d_fbo_multisampled);
+
+  glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, targets->multisample.space3d_tex.tex);
+  glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, render->samples, GL_RGBA8,
+                          render->bounds[0], render->bounds[1], GL_FALSE);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                         GL_TEXTURE_2D_MULTISAMPLE,
+                         targets->multisample.space3d_tex.tex, 0);
+  GLERR;
+
+  glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, targets->multisample.space3d_normal.tex);
+  glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, render->samples, GL_RGB8,
+                          render->bounds[0], render->bounds[1], GL_FALSE);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                         GL_TEXTURE_2D_MULTISAMPLE,
+                         targets->multisample.space3d_normal.tex, 0);
+  GLERR;
+
+  glBindTexture(GL_TEXTURE_2D_MULTISAMPLE,
+                targets->multisample.space3d_rough_metal.tex);
+  glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, render->samples, GL_RGB8,
+                          render->bounds[0], render->bounds[1], GL_FALSE);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2,
+                         GL_TEXTURE_2D_MULTISAMPLE,
+                         targets->multisample.space3d_rough_metal.tex, 0);
+  GLERR;
+
+  glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, targets->multisample.space3d_depth.tex);
+  glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, render->samples,
+                          GL_DEPTH_COMPONENT32F, render->bounds[0],
+                          render->bounds[1], GL_FALSE);
+
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                         GL_TEXTURE_2D_MULTISAMPLE,
+                         targets->multisample.space3d_depth.tex, 0);
+  GLERR;
 }
 
 void render_setambient(render_t* render, vec4 ambient) {
@@ -1178,16 +1516,16 @@ void object_free(object* obj) {
 
   switch (obj->shader) {
     case shader_pbr: {
-      glDeleteTextures(1, &obj->pbr.tex.diffuse);
-      glDeleteTextures(1, &obj->pbr.tex.emissive);
-      glDeleteTextures(1, &obj->pbr.tex.normal);
-      glDeleteTextures(1, &obj->pbr.tex.orm);
+      glDeleteTextures(1, &obj->params.pbr.tex.diffuse);
+      glDeleteTextures(1, &obj->params.pbr.tex.emissive);
+      glDeleteTextures(1, &obj->params.pbr.tex.normal);
+      glDeleteTextures(1, &obj->params.pbr.tex.orm);
       break;
     };
     case shader_tex:
     case shader_cubemap:
     case shader_txt: {
-      glDeleteTextures(1, &obj->texture);
+      glDeleteTextures(1, &obj->params.texture->tex);
       break;
     }
 
@@ -1196,137 +1534,151 @@ void object_free(object* obj) {
 }
 
 typedef struct {
-	vec3 pos;
-	tex_t cubemap;
+  vec3 pos;
+  tex_t cubemap;
 } probe_t;
 
 typedef struct {
-	float radius;
-	
-	map_t probes;
-	void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side); //renders into cubemap and side_tex
+  float radius;
+
+  map_t probes;
+  void (*render_probe)(render_t* render, targets_t* targets, tex_t* side_tex, tex_t* cubemap,
+                       GLenum side);  // renders into cubemap and side_tex
 } probes_t;
 
-probes_t probes_new(float radius, void (*render_probe)(render_t* render, tex_t side_tex, tex_t cubemap, GLenum side)) {
-	probes_t probes = {.radius=radius, .render_probe=render_probe};
-	probes.probes = map_new();
+probes_t probes_new(float radius,
+                    void (*render_probe)(render_t* render, targets_t* targets, tex_t* side_tex,
+                                         tex_t* cubemap, GLenum side)) {
+  probes_t probes = {.radius = radius, .render_probe = render_probe};
+  probes.probes = map_new();
 
-	map_configure_ulong_key(&probes.probes, sizeof(probe_t));
+  map_configure_ulong_key(&probes.probes, sizeof(probe_t));
 
-	return probes;
+  return probes;
 }
 
-void probe_render_side(render_t* render, probes_t* probes, tex_t side_tex, tex_t tex, GLenum side) {
-	glBindTexture(GL_TEXTURE_2D, side_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB, GL_FLOAT, NULL);
+void probe_render_side(render_t* render, targets_t* targets, probes_t* probes, tex_t* side_tex,
+                       tex_t* tex, GLenum side) {
+  glBindTexture(GL_TEXTURE_2D, side_tex->tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, CUBEMAP_RES, CUBEMAP_RES, 0, GL_RGB,
+               GL_FLOAT, NULL);
 
-	probes->render_probe(render, side_tex, tex, side);
-	convolve_side(render, side, tex, side_tex);
+  probes->render_probe(render, targets, side_tex, tex, side);
+  convolve_side(render, side, tex, side_tex);
 }
 
 uint64_t probe_pos_hash(float radius, vec3 pos) {
-	vec3 pos_radii;
-	glm_vec3_divs(pos, radius, pos_radii);
-	glm_vec3_adds(pos_radii, radius, pos_radii); //align so casting to int will return rounded distance
+  vec3 pos_radii;
+  glm_vec3_divs(pos, radius, pos_radii);
+  glm_vec3_adds(
+      pos_radii, radius,
+      pos_radii);  // align so casting to int will return rounded distance
 
-	return vec3_hash(pos_radii);
+  return vec3_hash(pos_radii);
 }
 
-probe_t* probe_new(render_t* render, probes_t* probes, vec3 pos) {
-	tex_t tex = cubemap_new(render, NULL, NULL, NULL, NULL, NULL, NULL);
-	tex_t side_tex = tex_new();
-	
-	glm_perspective(M_PI/2, 1.0, VIEW_NEAR, VIEW_FAR, render->space3d);
-	
-	//i can do this myself i dont need any... sinusoidal rotations or fancy stuff
-	//im sorry it used to be cleaner but we need to translate accounting for the skew
+probe_t* probe_new(render_t* render, targets_t* targets, probes_t* probes, vec3 pos) {
+  tex_t tex = cubemap_new(render, NULL, NULL, NULL, NULL, NULL, NULL);
+  tex_t side_tex = tex_new();
 
-	mat4 translate;
-	glm_translate_make(translate, pos); //this is stupid but i am lazy
-	
-	glm_mat4_identity(render->cam);
-	render->cam[1][1] = 1;
+  glm_perspective(M_PI / 2, 1.0, VIEW_NEAR, VIEW_FAR, render->space3d);
 
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_Z);
+  // i can do this myself i dont need any... sinusoidal rotations or fancy stuff
+  // im sorry it used to be cleaner but we need to translate accounting for the
+  // skew
 
-	glm_mat4_identity(render->cam);
-	render->cam[1][1] = 1;
-	render->cam[2][2] = -1;
+  mat4 translate;
+  glm_translate_make(translate, pos);  // this is stupid but i am lazy
 
-	render->cam[0][0] = -1;
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z);
+  glm_mat4_identity(render->cam);
+  render->cam[1][1] = 1;
 
-	glm_mat4_identity(render->cam);
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_POSITIVE_Z);
 
-	render->cam[2][2] = 0;
-	render->cam[1][1] = 0;
-	render->cam[2][1] = 1;
-	render->cam[1][2] = 1;
+  glm_mat4_identity(render->cam);
+  render->cam[1][1] = 1;
+  render->cam[2][2] = -1;
 
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_Y);
+  render->cam[0][0] = -1;
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_NEGATIVE_Z);
 
-	glm_mat4_identity(render->cam);
+  glm_mat4_identity(render->cam);
 
-	render->cam[2][2] = 0;
-	render->cam[1][1] = 0;
-	render->cam[2][1] = -1;
-	render->cam[1][2] = -1;
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y);
+  render->cam[2][2] = 0;
+  render->cam[1][1] = 0;
+  render->cam[2][1] = 1;
+  render->cam[1][2] = 1;
 
-	glm_mat4_identity(render->cam);
-	render->cam[1][1] = 1;
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_POSITIVE_Y);
 
-	render->cam[0][0] = 0;
-	render->cam[2][2] = 0;
-	render->cam[2][0] = -1;
-	render->cam[0][2] = 1;
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_NEGATIVE_X);
+  glm_mat4_identity(render->cam);
 
-	glm_mat4_identity(render->cam);
-	render->cam[1][1] = 1;
+  render->cam[2][2] = 0;
+  render->cam[1][1] = 0;
+  render->cam[2][1] = -1;
+  render->cam[1][2] = -1;
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_NEGATIVE_Y);
 
-	render->cam[0][0] = 0;
-	render->cam[2][2] = 0;
+  glm_mat4_identity(render->cam);
+  render->cam[1][1] = 1;
 
-	render->cam[2][0] = 1;
-	render->cam[0][2] = -1;
-	glm_mat4_mul(render->cam, translate, render->cam);
-	probe_render_side(render, probes, side_tex, tex, GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+  render->cam[0][0] = 0;
+  render->cam[2][2] = 0;
+  render->cam[2][0] = -1;
+  render->cam[0][2] = 1;
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_NEGATIVE_X);
 
-	tex_free(side_tex);
-	
-	uint64_t key = probe_pos_hash(probes->radius, pos);
+  glm_mat4_identity(render->cam);
+  render->cam[1][1] = 1;
 
-	probe_t* probe = map_insert(&probes->probes, &key).val;
-	glm_vec3_copy(pos, probe->pos);
-	probe->cubemap = tex;
+  render->cam[0][0] = 0;
+  render->cam[2][2] = 0;
 
-	update_bounds(render);
+  render->cam[2][0] = 1;
+  render->cam[0][2] = -1;
+  glm_mat4_mul(render->cam, translate, render->cam);
+  probe_render_side(render, targets, probes, &side_tex, &tex,
+                    GL_TEXTURE_CUBE_MAP_POSITIVE_X);
 
-	return probe;
+  tex_free(&side_tex);
+
+  uint64_t key = probe_pos_hash(probes->radius, pos);
+
+  probe_t* probe = map_insert(&probes->probes, &key).val;
+  glm_vec3_copy(pos, probe->pos);
+  probe->cubemap = tex;
+
+  update_bounds(render);
+
+  return probe;
 }
 
 void probe_select(render_t* render, probes_t* probes, vec3 pos) {
-	vec3 pos_radii;
-	glm_vec3_divs(pos, probes->radius, pos_radii);
-	
-	uint64_t key = probe_pos_hash(probes->radius, pos);
-	probe_t* probe = map_find(&probes->probes, &key);
+  vec3 pos_radii;
+  glm_vec3_divs(pos, probes->radius, pos_radii);
 
-	if (!probe) {
-		render->ibl.local_env_enabled = 0;
-		return;
-	}
-	
-	render->ibl.local_env_enabled = 1;
-	glm_vec3_copy(probe->pos, render->ibl.local_envpos);
+  uint64_t key = probe_pos_hash(probes->radius, pos);
+  probe_t* probe = map_find(&probes->probes, &key);
 
-	render->local_env = probe->cubemap;
+  if (!probe) {
+    render->ibl.local_env_enabled = 0;
+    return;
+  }
+
+  render->ibl.local_env_enabled = 1;
+  glm_vec3_copy(probe->pos, render->ibl.local_envpos);
+
+  render->local_env = probe->cubemap;
 }
 
 void add_rect(object* obj, vec3 start, vec3 end, vec2 tstart, vec2 tend) {
@@ -1394,16 +1746,45 @@ void add_cube(object* obj, vec3 start, vec3 end) {
            (vec2){0, 0}, (vec2){1, 1});
 }
 
-object rect(float width, float height, vec4 col) {
-  object obj = object_new();
-  glm_vec4_ucopy(col, obj.col);
+//size = size of image
+//scale = length covered by size
+tex_t shadowmap_new(render_t* render, targets_t* targets, void (*render_shadowmap)(objshader_params* params), float map_size, float map_scale) {
+	glm_mat4_identity(render->cam);
 
-  add_rect(&obj, (vec3){0, 0, 0}, (vec3){width, height, 0}, (vec2){0, 0},
-           (vec2){1, 1});
+	render->cam[1][1] = 0;
+	render->cam[2][2] = 0;
+	render->cam[2][1] = 1/map_scale;
+	render->cam[1][2] = -1;
 
-  object_init(&obj);
+	render->cam[0][0] = 1/map_scale;
 
-  return obj;
+	render->cam[3][2] = 1;
+
+	vec2 bounds;
+	glm_vec2_copy(render->bounds, bounds); //push old bounds onto stack :>)
+
+	render->bounds[0] = map_size;
+	render->bounds[1] = map_size;
+
+	render_reset(render);
+	render_reset3d(render, targets);
+
+	glDepthFunc(GL_GREATER);
+	
+	objshader_params params = {.height={.compare=0}};
+	render_shadowmap(&params);
+
+	glDepthFunc(GL_LESS);
+
+	tex_t heightmap = tex_new();
+	tex_default(&heightmap, GL_RED, render->bounds);
+
+	process_texture_2d(render, render->bounds, &targets->space3d_tex, &heightmap, texshader_tex, (texshader_params){});
+
+	glm_vec2_copy(bounds, render->bounds);
+	update_bounds(render);
+
+	return heightmap;
 }
 
 typedef struct {
@@ -1419,7 +1800,7 @@ typedef struct {
 
 // simple texture atlas for fonts
 typedef struct {
-  GLuint atlas;
+  tex_t atlas;
   atlas_pos chars[96];
   unsigned width, height;
 } font_t;
@@ -1448,8 +1829,8 @@ font_t font_new(render_t* render, char* fontpath, unsigned size) {
 
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // override default 4 byte alignment
 
-  glGenTextures(1, &font.atlas);
-  glBindTexture(GL_TEXTURE_2D, font.atlas);
+  glGenTextures(1, &font.atlas.tex);
+  glBindTexture(GL_TEXTURE_2D, font.atlas.tex);
 
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1497,8 +1878,8 @@ font_t font_new(render_t* render, char* fontpath, unsigned size) {
 object text(font_t* font, char* txt, vec4 col) {
   object obj = object_new();
   obj.shader = shader_txt;
-  obj.texture = font->atlas;
-  glm_vec4_ucopy(col, obj.col);
+  obj.params.texture = &font->atlas;
+  glm_vec4_ucopy(col, obj.params.col);
 
   obj.space = spacescreen;
 
@@ -1524,10 +1905,10 @@ object text(font_t* font, char* txt, vec4 col) {
   return obj;
 }
 
-void font_free(font_t* font) { glDeleteTextures(1, &font->atlas); }
+void font_free(font_t* font) { tex_free(&font->atlas); }
 
-tex_t load_gltf_texture(cgltf_texture* tex, GLenum format) {
-  tex_t gltex;
+GLuint load_gltf_texture(cgltf_texture* tex, GLenum format) {
+  GLuint gltex;
   glGenTextures(1, &gltex);
   glBindTexture(GL_TEXTURE_2D, gltex);
 
@@ -1609,33 +1990,38 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
       obj.shader = shader_pbr;
 
       if (basetex->texture)
-        obj.pbr.tex.diffuse = load_gltf_texture(basetex->texture, GL_RGBA);
+        obj.params.pbr.tex.diffuse =
+            load_gltf_texture(basetex->texture, GL_RGBA);
       else
-        obj.pbr.tex.diffuse = render->default_tex;
+        obj.params.pbr.tex.diffuse = render->default_tex;
       if (normaltex->texture)
-        obj.pbr.tex.normal = load_gltf_texture(normaltex->texture, GL_RGB);
+        obj.params.pbr.tex.normal =
+            load_gltf_texture(normaltex->texture, GL_RGB);
       else
-        obj.pbr.tex.normal = render->default_texrgb;
+        obj.params.pbr.tex.normal = render->default_texrgb;
       if (emissivetex->texture)
-        obj.pbr.tex.emissive = load_gltf_texture(emissivetex->texture, GL_RGB);
+        obj.params.pbr.tex.emissive =
+            load_gltf_texture(emissivetex->texture, GL_RGB);
       else
-        obj.pbr.tex.emissive = render->default_texrgb;
+        obj.params.pbr.tex.emissive = render->default_texrgb;
       if (orm->texture)
-        obj.pbr.tex.orm = load_gltf_texture(orm->texture, GL_RGBA);
+        obj.params.pbr.tex.orm = load_gltf_texture(orm->texture, GL_RGBA);
       else
-        obj.pbr.tex.orm = render->default_texrgb;
+        obj.params.pbr.tex.orm = render->default_texrgb;
 
       glm_vec4_ucopy(prim->material->pbr_metallic_roughness.base_color_factor,
-                     obj.pbr.col);
-      obj.pbr.metal = prim->material->pbr_metallic_roughness.metallic_factor;
-      obj.pbr.rough = prim->material->pbr_metallic_roughness.roughness_factor;
-      obj.pbr.normal = prim->material->normal_texture.texture
-                           ? prim->material->normal_texture.scale
-                           : 0;
-      obj.pbr.occlusion = prim->material->occlusion_texture.texture
-                              ? prim->material->occlusion_texture.scale
-                              : 1.0;
-      glm_vec3_copy(prim->material->emissive_factor, obj.pbr.emissive);
+                     obj.params.pbr.col);
+      obj.params.pbr.metal =
+          prim->material->pbr_metallic_roughness.metallic_factor;
+      obj.params.pbr.rough =
+          prim->material->pbr_metallic_roughness.roughness_factor;
+      obj.params.pbr.normal = prim->material->normal_texture.texture
+                                  ? prim->material->normal_texture.scale
+                                  : 0;
+      obj.params.pbr.occlusion = prim->material->occlusion_texture.texture
+                                     ? prim->material->occlusion_texture.scale
+                                     : 1.0;
+      glm_vec3_copy(prim->material->emissive_factor, obj.params.pbr.emissive);
 
       cgltf_node_transform_world(node, obj.transform[0]);
 
@@ -1707,11 +2093,11 @@ void load_gltf_node(render_t* render, cgltf_node* node, gltf_scene* sc) {
       glm_vec3_copy(node->light->color, dirl->color);
       dirl->color[3] = node->light->intensity;
 
-			vec4 dir;
+      vec4 dir;
       glm_mat4_mulv(transform, (vec4){0, 0, -1, 0}, dir);
       glm_normalize(dir);
 
-			glm_vec3_copy(dir, dirl->dir);
+      glm_vec3_copy(dir, dirl->dir);
     } else if (node->light->type == cgltf_light_type_point) {
       pointlight* pointl = map_insert(&sc->pointlights, &name).val;
       glm_vec3_copy(node->light->color, pointl->color);
@@ -1759,4 +2145,3 @@ gltf_scene load_gltf(render_t* render, char* path) {
 
   return sc;
 }
-
