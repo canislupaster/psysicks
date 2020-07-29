@@ -9,13 +9,6 @@
 
 //finds if point intersects triangle's projection from the origin
 int projective_intersects(vec3 v1, vec3 v2, vec3 v3, vec3 point) {
-	vec3 tripos;
-	glm_mat3_mulv(trimat, point, tripos);
-
-	if (tripos[0] == 0) return 1; //at origin
-	glm_vec3_divs(tripos, tripos[0], tripos);
-	
-	return tripos[1] > tripos[2] || tripos[1] < tripos[2] || tripos[2] > 1 || tripos[2] < 0;
 }
 
 object convex_obj(object* obj) {
@@ -38,7 +31,9 @@ object convex_obj(object* obj) {
 	while (vector_skip(&iter, 3)) {
 		vertex* verts = iter.x;
 
-		
+		float* v1 = verts[0].pos;
+		float* v2 = verts[1].pos;
+		float* v3 = verts[2].pos;
 
 		//create inverse matrix
 		mat3 trimat;
@@ -51,14 +46,18 @@ object convex_obj(object* obj) {
 
 		glm_mat3_inv(trimat, trimat);
 
-		
 		vector_iterator iter2 = vector_iterate(&obj->vertices);
 		while (vector_next(&iter2)) {
 			if (iter2.i < iter.i && iter2.i-1 >= iter.i-3)
 				continue;
 			
-			//un-skew point
-			
+			vec3 tripos;
+			glm_mat3_mulv(trimat, point, tripos);
+
+			if (tripos[0] == 0) return 1; //at origin
+			glm_vec3_divs(tripos, tripos[0], tripos);
+
+			return tripos[1] > tripos[2] || tripos[1] < tripos[2] || tripos[2] > 1 || tripos[2] < 0;
 		}
 	}
 }
