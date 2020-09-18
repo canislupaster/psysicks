@@ -1,2 +1,0 @@
-- [ ] heightmap sampling and generation
-- [ ] shadow fading and coeff

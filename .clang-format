@@ -1,5 +1,16 @@
 ﻿---
-BasedOnStyle: Google
-SpaceAfterCStyleCast: 'false'
+BasedOnStyle: Chromium
+AlignTrailingComments: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+ColumnLimit: 0
+DerivePointerAlignment: false
+IndentCaseLabels: true
+IndentWidth: 2
+PointerAlignment: Left
+SpaceAfterCStyleCast: false
+TabWidth: 2
+UseTab: Always
 
 ...
