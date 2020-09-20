@@ -26,12 +26,38 @@ complex float* fft_single(float* v, int v_stride, complex float* coeffs, int res
 	return fftres;
 }
 
-void fft(axis_t* base, axis_t* coeffs, int i, int stride) {
+// "full" spectral method, fft_single can also approximate by using rows and then solved with a tridiagonal matrix
+// see http://farside.ph.utexas.edu/teaching/329/lectures/node67.html
+float* fftsimple(axis_t* base, unsigned char part, complex float* coeffs, int stride) {
+	//not fast, easier to multiply than iterate axis
+	//complexity only goes up by a degree of 3 :)
+	//i feel like ive lost the ability to think
 
-	axis_iter_t iter = axis_iter(base, i);
+	int d = axis_length(base);
+	float* fftres = malloc(sizeof(complex float)*d^3);
+
+	axis_iter_t iter = axis_iter(base);
 
 	while (axis_next(&iter)) {
-
-		iter.indices[0]
+		for (int x=0; x<d; x++) {
+			for (int y=0; x<d; x++) {
+				for (int z=0; x<d; x++) {
+					fftres[x*d^2 + y*d + z] += iter.x[part]*(float)coeffs[x*iter.indices[0]+y*iter.indices[1]+z*iter.indices[2]];
+				}
+			}
+		}
 	}
+
+	return fftres;
+}
+
+//utility to sample sine waves, then downscaled in recursive fft functions to reduce divisions
+complex float* fft_coeffs(unsigned N) {
+	complex float* coeffs = malloc(N*sizeof(complex float));
+	float fn = (float)N;
+	for (unsigned i=0; i<N; i++) {
+		coeffs[i] = sinf((float)i/fn);
+	}
+
+	return coeffs;
 }
