@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <limits.h>
 
-#include <SDL2/SDL.h>
+#include <SDL.h>
 
 #include "gl.h"
 

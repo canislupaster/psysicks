@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #include "gl.h"
 #include <cglm/cglm.h>
 #include "util.h"

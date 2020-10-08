@@ -12,7 +12,7 @@
 #include "cgltf.h"
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "fpsutil.h"
+#include "plotutil.h"
 #include "hashtable.h"
 #include "stb_image.h"
 #include "util.h"
@@ -315,10 +315,10 @@ typedef struct {
   int samples;
 } render_t;
 
-GLuint vert_shad_new(const char* vert_src) {
+GLuint vert_shad_new(char* vert_src) {
   GLuint vert = glCreateShader(GL_VERTEX_SHADER);
 
-  glShaderSource(vert, 1, &vert_src, NULL);
+  glShaderSource(vert, 1, (const GLchar* const*)&vert_src, NULL);
   glCompileShader(vert);
 
   int succ;
@@ -330,13 +330,15 @@ GLuint vert_shad_new(const char* vert_src) {
     errx("shader vert: \n%s\n", err);
   }
 
+	drop(vert_src);
+
   return vert;
 }
 
-GLuint prog_new(const char* frag_src, GLuint vert) {
+GLuint prog_new(char* frag_src, GLuint vert) {
   GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
 
-  glShaderSource(frag, 1, &frag_src, NULL);
+  glShaderSource(frag, 1, (const char* const*)&frag_src, NULL);
   glCompileShader(frag);
 
   int succ;
@@ -353,10 +355,12 @@ GLuint prog_new(const char* frag_src, GLuint vert) {
   glAttachShader(prog, frag);
   glLinkProgram(prog);
 
+	drop(frag_src);
+
   return prog;
 }
 
-obj_shader shader_new(const char* frag_src, GLuint vert) {
+obj_shader shader_new(char* frag_src, GLuint vert) {
   obj_shader shad = {.prog = prog_new(frag_src, vert)};
   shad.obj = glGetUniformBlockIndex(shad.prog, "object");
   glUniformBlockBinding(shad.prog, shad.obj, 0);
@@ -366,7 +370,7 @@ obj_shader shader_new(const char* frag_src, GLuint vert) {
   return shad;
 }
 
-tex_shader tex_shader_new(const char* frag_src, GLuint vert) {
+tex_shader tex_shader_new(char* frag_src, GLuint vert) {
   tex_shader shad = {.prog = prog_new(frag_src, vert)};
   shad.tex = glGetUniformLocation(shad.prog, "tex");
   return shad;
@@ -397,41 +401,43 @@ tex_t unit_texture(GLenum format, char val) {
 	return tex;
 }
 
-void load_shaders(render_t* render) {
-  GLuint fillvert = vert_shad_new(read_file("shaders/fill.vert"));
+void load_shaders(render_t* render, char* proc) {
+	char* up = straffix(path_trunc(proc, 3), "/plotter/shaders/");
 
-  render->fill.shader = shader_new(read_file("shaders/fill.frag"), fillvert);
+  GLuint fillvert = vert_shad_new(read_file(stradd(up, "/fill.vert")));
+
+  render->fill.shader = shader_new(read_file(stradd(up, "/fill.frag")), fillvert);
   render->fill.color = glGetUniformLocation(render->fill.shader.prog, "color");
 
-  GLuint posvert = vert_shad_new(read_file("shaders/pos.vert"));
+  GLuint posvert = vert_shad_new(read_file(stradd(up, "/pos.vert")));
 
   render->cubemap.shader =
-      shader_new(read_file("shaders/cubemap.frag"), posvert);
+      shader_new(read_file(stradd(up, "/cubemap.frag")), posvert);
   render->cubemap.tex =
       glGetUniformLocation(render->cubemap.shader.prog, "tex");
 
-  render->height.shader = shader_new(read_file("shaders/height.frag"), posvert);
+  render->height.shader = shader_new(read_file(stradd(up, "/height.frag")), posvert);
 	render->height.compare = glGetUniformLocation(render->height.shader.prog, "compare");
 	render->height.compare_to = glGetUniformLocation(render->height.shader.prog, "compare_to");
 	render->height.heightmap_size = glGetUniformLocation(render->height.shader.prog, "heightmap_size");
 
-  GLuint tex3dvert = vert_shad_new(read_file("shaders/tex3d.vert"));
+  GLuint tex3dvert = vert_shad_new(read_file(stradd(up, "/tex3d.vert")));
 
-  render->tex3d.shader = shader_new(read_file("shaders/tex3d.frag"), tex3dvert);
+  render->tex3d.shader = shader_new(read_file(stradd(up, "/tex3d.frag")), tex3dvert);
   render->tex3d.tex = glGetUniformLocation(render->tex3d.shader.prog, "tex");
 
-  render->txt.shader = shader_new(read_file("shaders/txt.frag"), tex3dvert);
+  render->txt.shader = shader_new(read_file(stradd(up, "/txt.frag")), tex3dvert);
   render->txt.color = glGetUniformLocation(render->txt.shader.prog, "color");
   render->txt.tex = glGetUniformLocation(render->txt.shader.prog, "tex");
 
-  GLuint arrowvert = vert_shad_new(read_file("shaders/arrow.vert"));
+  GLuint arrowvert = vert_shad_new(read_file(stradd(up, "/arrow.vert")));
 
-  render->arrow.shader = shader_new(read_file("shaders/arrow.frag"), arrowvert);
+  render->arrow.shader = shader_new(read_file(stradd(up, "/arrow.frag")), arrowvert);
   render->arrow.vec = glGetUniformLocation(render->arrow.shader.prog, "vec");
 
-  GLuint pbrvert = vert_shad_new(read_file("shaders/pbr.vert"));
+  GLuint pbrvert = vert_shad_new(read_file(stradd(up, "/pbr.vert")));
 
-  render->pbr.shader = shader_new(read_file("shaders/pbr.frag"), pbrvert);
+  render->pbr.shader = shader_new(read_file(stradd(up, "/pbr.frag")), pbrvert);
   render->pbr.color = glGetUniformLocation(render->pbr.shader.prog, "color");
   render->pbr.emissive =
       glGetUniformLocation(render->pbr.shader.prog, "emissive");
@@ -457,10 +463,10 @@ void load_shaders(render_t* render) {
       glGetUniformBlockIndex(render->pbr.shader.prog, "lighting");
   glUniformBlockBinding(render->pbr.shader.prog, pbr_lighting, 1);
 
-  GLuint shadowvert = vert_shad_new(read_file("shaders/shadow.vert"));
+  GLuint shadowvert = vert_shad_new(read_file(stradd(up, "/shadow.vert")));
 
   render->shadow.shader =
-      shader_new(read_file("shaders/shadow.frag"), shadowvert);
+      shader_new(read_file(stradd(up, "/shadow.frag")), shadowvert);
   render->shadow.light_dirpos =
       glGetUniformLocation(render->shadow.shader.prog, "light_dirpos");
   render->shadow.softness =
@@ -473,20 +479,20 @@ void load_shaders(render_t* render) {
   render->shadow.heightmap_size =
       glGetUniformLocation(render->shadow.shader.prog, "heightmap_size");
 
-  GLuint texvert = vert_shad_new(read_file("shaders/tex.vert"));
+  GLuint texvert = vert_shad_new(read_file(stradd(up, "/tex.vert")));
 
   render->boxfilter.shader =
-      tex_shader_new(read_file("shaders/boxfilter.frag"), texvert);
+      tex_shader_new(read_file(stradd(up, "/boxfilter.frag")), texvert);
   render->boxfilter.size =
       glGetUniformLocation(render->boxfilter.shader.prog, "size");
 
-  render->ao.shader = tex_shader_new(read_file("shaders/ao.frag"), texvert);
+  render->ao.shader = tex_shader_new(read_file(stradd(up, "/ao.frag")), texvert);
   render->ao.radius = glGetUniformLocation(render->ao.shader.prog, "radius");
   render->ao.samples = glGetUniformLocation(render->ao.shader.prog, "samples");
   render->ao.normal = glGetUniformLocation(render->ao.shader.prog, "normal");
   render->ao.seed = glGetUniformLocation(render->ao.shader.prog, "seed");
 
-  render->ssr.shader = tex_shader_new(read_file("shaders/ssr.frag"), texvert);
+  render->ssr.shader = tex_shader_new(read_file(stradd(up, "/ssr.frag")), texvert);
   render->ssr.normal = glGetUniformLocation(render->ssr.shader.prog, "normal");
   render->ssr.depth = glGetUniformLocation(render->ssr.shader.prog, "depth");
   render->ssr.size = glGetUniformLocation(render->ssr.shader.prog, "size");
@@ -494,7 +500,7 @@ void load_shaders(render_t* render) {
       glGetUniformLocation(render->ssr.shader.prog, "space");
 
   render->postproc3d.shader =
-      tex_shader_new(read_file("shaders/postprocess3d.frag"), texvert);
+      tex_shader_new(read_file(stradd(up, "/postprocess3d.frag")), texvert);
   render->postproc3d.size =
       glGetUniformLocation(render->postproc3d.shader.prog, "size");
   render->postproc3d.depth =
@@ -510,7 +516,7 @@ void load_shaders(render_t* render) {
   render->postproc3d.rough_metal =
       glGetUniformLocation(render->postproc3d.shader.prog, "rough_metal");
 
-  render->tex.shader = tex_shader_new(read_file("shaders/tex.frag"), texvert);
+  render->tex.shader = tex_shader_new(read_file(stradd(up, "/tex.frag")), texvert);
 }
 
 void add_rect(object_t* obj, vec3 width, vec3 height, vec2 tstart, vec2 tend);
@@ -568,7 +574,7 @@ targets_t targets_new(render_t* render, char multisample) {
   return targets;
 }
 
-render_t render_new(vec2 bounds, int samples) {
+render_t render_new(char* proc, vec2 bounds, int samples) {
   render_t render;
   render.samples = samples;
   render.space_current = spaceuninit;
@@ -609,7 +615,7 @@ render_t render_new(vec2 bounds, int samples) {
   render.default_texred = unit_texture(GL_RED, (char)255);
   render.default_texdep = unit_texture(GL_DEPTH_COMPONENT, (char)255);
 
-  load_shaders(&render);
+  load_shaders(&render, proc);
 
   // set rect
   render.full_rect = object_new();

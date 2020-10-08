@@ -1,11 +1,11 @@
-#include <SDL2/SDL.h>
+#include <SDL.h>
 
 #include "cfg.h"
 #include "cglm/cglm.h"
 #include "cglm/mat4.h"
 #include "cglm/vec2.h"
 #include "cglm/vec3.h"
-#include "fpsutil.h"
+#include "plotutil.h"
 #include "gl.h"
 #include "graphics.h"
 #include "hashtable.h"
@@ -36,12 +36,13 @@ map_t default_configuration() {
   return cfg;
 }
 
+unsigned long frame = 0;
+
 tex_t ao;
 tex_t ssr;
+
 tex_t shadow_tex;
 tex_t shadow_dep;
-
-unsigned long frame = 0;
 
 void update_bounds_main(render_t* render) {
 	tex_default(&ao, GL_RED, render->bounds);
@@ -87,12 +88,10 @@ int main(int argc, char** argv) {
   SDL_GetWindowSize(window, &w, &h);
 
   vec2 bounds = {(float)w, (float)h};
-  render_t render = render_new(bounds, 4);
+  render_t render = render_new(argv[0], bounds, 4);
 
 	targets_t default_targets = targets_new(&render, 1);
 	render.targets = &default_targets;
-
-  tex_t tex = load_hdri(&render, "./Frozen_Waterfall_Ref.hdr");
 
   vec2 player_rot = {0,0};
 
@@ -100,8 +99,7 @@ int main(int argc, char** argv) {
 
   vector_pushcpy(&render.dirlights, &(dirlight){.dir={1, -1, 0}, .color={1,1,1,0.2}});
 
-  render.global_env = tex;
-	render.ibl.global_env_enabled = 1;
+	render.ibl.global_env_enabled = 0;
 
   render_setambient(&render, (vec4){0.2,0.2,0.2,0.2});
 
@@ -137,9 +135,9 @@ int main(int argc, char** argv) {
 	ao = tex_new();
 	shadow_tex = unit_texture(GL_RGB, 0);
 	shadow_dep = unit_texture(GL_DEPTH_COMPONENT, 0);
-	
+
 	GLERR;
-	
+
 	update_bounds_main(&render);
 
 	while (1) {
@@ -157,7 +155,7 @@ int main(int argc, char** argv) {
 		arrow.transform[0][0] = field.scale;
 		arrow.transform[1][1] = field.scale;
 
-		axis_iter_t a_iter = axis_iter(&field.z, 2);
+		axis_iter_t a_iter = axis_iter(&field.z);
 		while (axis_next(&a_iter)) {
 			field_fromint(&field, a_iter.indices, arrow.transform[3]);
 			arrow.params.arrow = a_iter.x;
@@ -213,7 +211,7 @@ int main(int argc, char** argv) {
         case SDL_KEYDOWN: {
           switch (ev.key.keysym.sym) {
             case SDLK_r:
-              load_shaders(&render);
+              load_shaders(&render, argv[0]);
               break;
             case SDLK_ESCAPE: {
               SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -244,9 +242,7 @@ int main(int argc, char** argv) {
   }
 
   object_free(&arrow);
-  // object_free(scobj);
 
-  // font_free(&font);
   render_free(&render);
 
   SDL_GetWindowPosition(window, cfg_val(&cfg, CFG_X), cfg_val(&cfg, CFG_Y));

@@ -34,7 +34,7 @@ float* fftsimple(axis_t* base, unsigned char part, complex float* coeffs, int st
 	//i feel like ive lost the ability to think
 
 	int d = axis_length(base);
-	float* fftres = malloc(sizeof(complex float)*d^3);
+	float* fftres = malloc(sizeof(complex float)*d*d*d);
 
 	axis_iter_t iter = axis_iter(base);
 
@@ -42,7 +42,7 @@ float* fftsimple(axis_t* base, unsigned char part, complex float* coeffs, int st
 		for (int x=0; x<d; x++) {
 			for (int y=0; x<d; x++) {
 				for (int z=0; x<d; x++) {
-					fftres[x*d^2 + y*d + z] += iter.x[part]*(float)coeffs[x*iter.indices[0]+y*iter.indices[1]+z*iter.indices[2]];
+					fftres[x*d*d + y*d + z] += iter.x[part]*(float)coeffs[x*iter.indices[0]+y*iter.indices[1]+z*iter.indices[2]];
 				}
 			}
 		}

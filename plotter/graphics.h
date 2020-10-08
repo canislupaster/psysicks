@@ -259,14 +259,14 @@ typedef struct {
 void update_bounds(render_t* render);
 tex_t tex_new();
 tex_t unit_texture(GLenum format, char val);
-void load_shaders(render_t* render);
+void load_shaders(render_t* render, char* proc);
 void add_rect(object_t* obj, vec3 width, vec3 height, vec2 tstart, vec2 tend);
 void add_cube(object_t* obj, vec3 start, vec3 end);
 object_t object_new();
 void object_init(object_t* obj);
 void render_update_bounds3d_multisample(render_t* render, targets_t* targets);
 targets_t targets_new(render_t* render, char multisample);
-render_t render_new(vec2 bounds, int samples);
+render_t render_new(char* proc, vec2 bounds, int samples);
 void object_init(object_t* obj);
 tex_t tex_new();
 void tex_default(tex_t* tex, GLenum format, vec2 bounds);
@@ -307,7 +307,6 @@ void process_texture_2d(render_t* render, vec2 bounds, tex_t* tex,
                         texshader_params params);
 void render_texture(render_t* render, tex_t* tex, texshader_type shadtype,
                     texshader_params params);
-tex_t load_hdri(render_t* render, char* hdri);
 void render_object(render_t* render, object_t* obj);
 void render_reset(render_t* render);
 void render_reset3d_multisample(render_t* render, targets_t* targets);

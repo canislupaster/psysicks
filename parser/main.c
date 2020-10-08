@@ -164,10 +164,9 @@ int main(int argc, char** argv) {
 	do {
 		obj = json_next(&jparse);
 		if (jparse.err) {
-			printf("%s", jparse.err);
+			printf("error parsing: %s\n", jparse.err);
 			return 1;
 		}
-
 
 	} while (obj.ty != json_done);
 }
